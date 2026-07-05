@@ -109,7 +109,8 @@ def update_tracker(path: str | Path, listings: list[Listing]) -> dict:
     ws = wb[FLATS_SHEET]
     today = date.today().isoformat()
     seen = _existing_urls(ws)
-    added = dupes = 0
+    new_urls: set[str] = set()
+    dupes = 0
 
     for listing in listings:
         url = listing.url.strip()
@@ -118,9 +119,9 @@ def update_tracker(path: str | Path, listings: list[Listing]) -> dict:
             continue
         _append(ws, listing, today)
         seen.add(url)
-        added += 1
+        new_urls.add(url)
 
     ws.auto_filter.ref = ws.dimensions
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
-    return {"added": added, "duplicates": dupes}
+    return {"added": len(new_urls), "duplicates": dupes, "new_urls": new_urls}
