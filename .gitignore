@@ -3,9 +3,13 @@ config.md
 
 # Generated outputs — personal data
 outreach/*.txt
+outreach/*.html
 *.xlsx
 *.xlsm
 *.csv
+
+# Debug HTML dumps from --debug-dir
+debug/
 
 # macOS
 .DS_Store
