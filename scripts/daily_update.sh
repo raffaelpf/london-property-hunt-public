@@ -8,13 +8,13 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-CODE_BRANCH="claude/london-property-search-analysis-et853y"
 TRACKER_BRANCH="claude/daily-tracker"
 TRACKER="tracker/london_flat_hunt.xlsx"
 
-git fetch origin --quiet
-git checkout "$CODE_BRANCH" --quiet
-git pull --ff-only origin "$CODE_BRANCH" --quiet || true
+# Run with whatever code is checked out. Scheduled routines clone the repo's
+# default branch (main) fresh each run, so the code is already here — no branch
+# checkout needed.
+git fetch origin --quiet || true
 
 pip install -q -r requirements.txt
 
