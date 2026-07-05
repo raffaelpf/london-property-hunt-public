@@ -154,31 +154,60 @@ def run(cfg, tracker_path, outreach_dir, platforms, debug_dir, limit) -> dict:
 
 
 def print_summary(res: dict, tracker_path: str) -> None:
+    """Emit a clean Markdown summary (relayed verbatim by the scheduled routine)."""
+    from scraper.features import OUTDOOR_LABELS
+
     p, t = res["priorities"], res["tracker"]
-    print("\n" + "=" * 62)
-    print("🏠 LONDON FLAT HUNT — RUN SUMMARY")
-    print("=" * 62)
-    print("Platforms:      " + (", ".join(f"{k}={v}" for k, v in res["per_platform"].items()) or "none"))
-    print(f"Raw → in-scope: {res['raw']} → {res['candidates']} (enriched {res['enriched']})")
-    print(f"Priority:       🟢 HIGH {p['High']} | 🟡 MEDIUM {p['Medium']} | ⚪ LOW {p['Low']}")
-    print(f"Tracker:        +{t['added']} added, {t['duplicates']} duplicates skipped")
-    print(f"Outreach files: {res['outreach_written']}")
-    print(f"Tracker file:   {tracker_path}")
-    if res["errors"]:
-        print(f"\n⚠️  {len(res['errors'])} platform error(s):")
-        for e in res["errors"]:
-            print(f"   - {e}")
+    new_urls = set(t.get("new_urls") or [])
+
+    def dupe_key(l):
+        # Same flat listed on >1 platform: match on price + beds + location.
+        return (l.price_pcm, l.bed_count, (l.postcode or l.area[:14]).lower())
+
+    def collapse(items: list) -> list:
+        """Merge cross-platform duplicates, keeping one entry with all links."""
+        groups: dict = {}
+        order: list = []
+        for l in items:
+            k = dupe_key(l)
+            if k not in groups:
+                groups[k] = [l]
+                order.append(k)
+            else:
+                groups[k].append(l)
+        return [groups[k] for k in order]
+
+    def line(group: list) -> str:
+        l = group[0]
+        price = f"£{l.price_pcm:,}/mo" if l.price_pcm else "£?"
+        size = f"{l.size_sqft} sqft" if l.size_sqft else "size n/a"
+        furn = l.furnishing.replace("-", " ") if l.furnishing not in ("", "unknown") else "furnishing n/a"
+        badge = " 🆕" if any(x.url.strip() in new_urls for x in group) else ""
+        links = " · ".join(f"[{x.platform}]({x.url})" for x in group)
+        return (f"- **{price}** · {l.bed_label or '?'} · {size} · {OUTDOOR_LABELS.get(l.outdoor)} · {furn}\n"
+                f"  {l.area} — {links}{badge}")
+
     ranked = sorted(res["kept"], key=lambda l: {"High": 0, "Medium": 1, "Low": 2}[l.priority])
-    if ranked:
-        print("\nTop listings:")
-        from scraper.features import OUTDOOR_LABELS
-        for l in ranked[:12]:
-            price = f"£{l.price_pcm}" if l.price_pcm else "£?"
-            size = f"{l.size_sqft}sqft" if l.size_sqft else "size?"
-            print(f"   [{l.priority[:1]}] {l.platform:11} | {l.bed_label or '?':6} | {price:6} | "
-                  f"{OUTDOOR_LABELS.get(l.outdoor):24} | {size:8} | {l.area[:24]}")
-            print(f"       {l.url}")
-    print("=" * 62)
+    highs = collapse([l for l in ranked if l.priority == "High"])
+    meds = collapse([l for l in ranked if l.priority == "Medium"])
+
+    out = [
+        "# 🏠 London flat hunt",
+        "",
+        f"**{t['added']} new** today · {t['duplicates']} already tracked · "
+        f"scanned {res['raw']} listings, {res['candidates']} in scope.",
+        "",
+        f"🟢 **{p['High']} HIGH**  ·  🟡 {p['Medium']} MEDIUM  ·  ⚪ {p['Low']} LOW  ·  🆕 = new today",
+    ]
+    if highs:
+        out += ["", "## 🟢 HIGH priority"] + [line(l) for l in highs]
+    if meds:
+        out += ["", f"## 🟡 MEDIUM (top {min(6, len(meds))} of {len(meds)})"] + [line(l) for l in meds[:6]]
+    if not highs and not meds:
+        out += ["", "_No HIGH or MEDIUM matches in scope today._"]
+    if res["errors"]:
+        out += ["", "### ⚠️ Notes"] + [f"- {e}" for e in res["errors"]]
+    print("\n".join(out))
 
 
 def main() -> int:
