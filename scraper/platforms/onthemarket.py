@@ -62,35 +62,62 @@ def search(url: str, cfg: dict, listing_type: str = "flat", debug_dir=None) -> l
     return listings
 
 
+def _property_node(nxt) -> dict | None:
+    """Find the detail-page property object (camelCase keys)."""
+    for node in base.walk(nxt):
+        if isinstance(node, dict) and "lettingDetails" in node and "description" in node:
+            return node
+    for node in base.walk(nxt):
+        if isinstance(node, dict) and "propertyTitle" in node and "description" in node:
+            return node
+    return None
+
+
+def _node_size_sqft(node: dict) -> int | None:
+    size = node.get("minimumAreaSqFt")
+    if not size and node.get("minimumAreaSqM"):
+        try:
+            size = round(float(node["minimumAreaSqM"]) * 10.7639)
+        except (TypeError, ValueError):
+            size = None
+    try:
+        size = int(size) if size else None
+    except (TypeError, ValueError):
+        return None
+    return size if size and 100 <= size <= 6000 else None
+
+
 def enrich(listing: Listing, debug_dir=None) -> None:
-    """Fetch the detail page and refine outdoor/furnishing/sqft from full text."""
+    """Fetch the detail page and refine outdoor/furnishing/size from real fields.
+
+    The furnishing lives in ``lettingDetails.items`` (e.g. ["Furnished", ...]),
+    the description in ``description``, features in ``features:[{feature}]``, and
+    size in ``minimumAreaSqFt`` — not in a single description blob.
+    """
     try:
         status, html = fetch_html(listing.url)
     except Exception:
         return
     if status != 200:
         return
-    text = _detail_text(html)
-    a = analyze_text(text)
-    _merge(listing, a)
 
-
-def _detail_text(html: str) -> str:
-    """Pull the description + features from an OTM detail page."""
     nxt = base.next_data(html)
-    parts: list[str] = []
-    if nxt:
-        for node in base.walk(nxt):
-            if isinstance(node, dict):
-                for key in ("description", "features", "full-description", "key-features"):
-                    v = node.get(key)
-                    if isinstance(v, str):
-                        parts.append(v)
-                    elif isinstance(v, list):
-                        parts += [str(x) for x in v]
-    if not parts:  # fallback: visible body text
-        parts.append(base.soup(html).get_text(" "))
-    return base.clean(" ".join(parts))[:8000]
+    node = _property_node(nxt) if nxt else None
+    if node:
+        letting = node.get("lettingDetails") or {}
+        parts = [str(x) for x in (letting.get("items") or [])] if isinstance(letting, dict) else []
+        parts += [
+            str(f.get("feature", "")) if isinstance(f, dict) else str(f)
+            for f in (node.get("features") or [])
+        ]
+        parts += [str(node.get("description") or ""), str(node.get("summary") or "")]
+        a = analyze_text(base.clean(" ".join(parts))[:8000])
+        _merge(listing, a)
+        size = _node_size_sqft(node)
+        if size and not listing.size_sqft:
+            listing.size_sqft = size
+    else:  # fallback: visible body text
+        _merge(listing, analyze_text(base.soup(html).get_text(" ")[:8000]))
 
 
 def _merge(listing: Listing, a: dict) -> None:

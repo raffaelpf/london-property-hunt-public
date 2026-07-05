@@ -8,10 +8,20 @@ mentions those terms. No detail-page fetch needed.
 
 from __future__ import annotations
 
+import re
+
 from ..features import analyze_text
 from ..fetch import dump_html, fetch_html
 from ..models import Listing
 from . import base
+
+_FURNISH_MAP = {
+    "part furnished": "part-furnished",
+    "part-furnished": "part-furnished",
+    "unfurnished": "unfurnished",
+    "furnished or unfurnished": "flexible",
+    "furnished": "furnished",
+}
 
 _BASE = "https://www.rightmove.co.uk"
 _BED_LABEL = {0: "Studio", 1: "1-Bed", 2: "2-Bed"}
@@ -73,6 +83,47 @@ def _parse_sqft(display_size) -> int | None:
     import re
     m = re.search(r"([\d,]+)\s*sq", str(display_size))
     return int(m.group(1).replace(",", "")) if m else None
+
+
+def enrich(listing: Listing, debug_dir=None) -> None:
+    """Refine furnishing/outdoor/size from the Rightmove detail page.
+
+    The detail page ships data as a flattened ``window.__PAGE_MODEL`` blob, so we
+    read the rendered HTML: the ``keyFeatures`` list, the description section, and
+    the "Furnish type: …" letting label.
+    """
+    try:
+        status, html = fetch_html(listing.url)
+    except Exception:
+        return
+    if status != 200:
+        return
+    s = base.soup(html)
+
+    # keyFeatures only — Rightmove's detail page has a standing glossary
+    # ("GARDEN: a property has access to…") that would false-positive on the
+    # full description. Balcony/terrace from the full text is already covered by
+    # the search-stage keyword-match.
+    kf = " ".join(el.get_text(" ") for el in s.select('[data-testid="keyFeatures"]'))
+    a = analyze_text(base.clean(kf)[:4000])
+
+    # Authoritative furnishing label from the letting-details section.
+    flat_text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
+    m = re.search(r"Furnish type[:\s]*([A-Za-z][A-Za-z \-]{2,24})", flat_text)
+    if m:
+        label = m.group(1).strip().lower()
+        for key, val in _FURNISH_MAP.items():
+            if label.startswith(key):
+                listing.furnishing = val
+                break
+    elif listing.furnishing in ("", "unknown") and a["furnishing"] != "unknown":
+        listing.furnishing = a["furnishing"]
+
+    order = {"private": 3, "communal": 2, "juliet": 1, "none": 0}
+    if order[a["outdoor"]] > order[listing.outdoor]:
+        listing.outdoor = a["outdoor"]
+    if not listing.size_sqft and a["sqft"]:
+        listing.size_sqft = a["sqft"]
 
 
 def search(url: str, cfg: dict, listing_type: str = "flat", debug_dir=None, max_pages: int = 4) -> list[Listing]:
