@@ -1,4 +1,5 @@
-# Personal config (committed by choice — not sensitive)
+# Personal config — never commit (may hold sensitive details later)
+config.md
 
 # Generated outputs — personal data
 outreach/*.txt
