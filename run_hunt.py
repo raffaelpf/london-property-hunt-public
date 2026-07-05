@@ -28,6 +28,32 @@ from scraper.tracker import update_tracker
 
 MAX_ENRICH = 120  # cap detail-page fetches per run
 
+# Same flat is often listed on several portals — prefer Rightmove as the master.
+_PLATFORM_RANK = {"Rightmove": 0, "OnTheMarket": 1, "OpenRent": 2}
+# Direct download of the committed tracker (lives on the daily-tracker branch).
+TRACKER_DOWNLOAD = (
+    "https://github.com/raffaelpf/london-property-hunt-public/raw/"
+    "claude/daily-tracker/tracker/london_flat_hunt.xlsx"
+)
+
+
+def _dupe_key(l) -> tuple:
+    return (l.price_pcm, l.bed_count, (l.postcode or l.area[:14]).lower())
+
+
+def dedup_master(listings: list) -> list:
+    """Drop a listing when the same flat exists on a higher-priority platform.
+
+    Rightmove < OnTheMarket < OpenRent. Same-platform listings that share a key
+    are all kept (they're likely distinct flats, not cross-postings)."""
+    best: dict = {}
+    for l in listings:
+        k = _dupe_key(l)
+        rank = _PLATFORM_RANK.get(l.platform, 9)
+        if k not in best or rank < best[k]:
+            best[k] = rank
+    return [l for l in listings if _PLATFORM_RANK.get(l.platform, 9) == best[_dupe_key(l)]]
+
 
 def _slug(area: str) -> str:
     return quote(area.strip().lower().replace(" ", "-"))
@@ -120,6 +146,9 @@ def run(cfg, tracker_path, outreach_dir, platforms, debug_dir, limit) -> dict:
         if _in_scope(l, cfg):
             candidates.append(l)
 
+    # Collapse cross-platform duplicates, keeping the master (Rightmove) copy.
+    candidates = dedup_master(candidates)
+
     enriched = 0
     for l in candidates:
         module = REGISTRY.get(l.platform)
@@ -207,6 +236,7 @@ def print_summary(res: dict, tracker_path: str) -> None:
         out += ["", "_No HIGH or MEDIUM matches in scope today._"]
     if res["errors"]:
         out += ["", "### ⚠️ Notes"] + [f"- {e}" for e in res["errors"]]
+    out += ["", f"📥 **[Download the full tracker (Excel)]({TRACKER_DOWNLOAD})**"]
     print("\n".join(out))
 
 
