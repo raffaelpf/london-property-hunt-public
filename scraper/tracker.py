@@ -58,18 +58,6 @@ def load_or_create(path: str | Path) -> openpyxl.Workbook:
     return wb
 
 
-def _existing_urls(ws) -> set[str]:
-    url_idx = COLS.index("URL") + 1
-    urls: set[str] = set()
-    for row in ws.iter_rows(min_row=2, min_col=url_idx, max_col=url_idx):
-        cell = row[0]
-        if cell.value:
-            urls.add(str(cell.value).strip())
-            if cell.hyperlink:
-                urls.add(str(cell.hyperlink.target).strip())
-    return urls
-
-
 def _values(listing: Listing, today: str) -> dict:
     return {
         "Title": listing.title,
@@ -90,38 +78,70 @@ def _values(listing: Listing, today: str) -> dict:
     }
 
 
-def _append(ws, listing: Listing, today: str) -> None:
-    values = _values(listing, today)
-    row_idx = ws.max_row + 1
-    fill = _PRIORITY_FILL.get(listing.priority)
-    for i, col in enumerate(COLS, 1):
-        cell = ws.cell(row=row_idx, column=i, value=values[col])
-        if fill:
-            cell.fill = fill
-        if col == "URL" and listing.url:
-            cell.hyperlink = listing.url
-            cell.font = Font(color="0563C1", underline="single")
+_PRANK = {"High": 0, "Medium": 1, "Low": 2}
+
+
+def _read_rows(ws) -> list[dict]:
+    """Read existing data rows as dicts, preserving any manual edits (Status, etc.)."""
+    rows: list[dict] = []
+    for r in ws.iter_rows(min_row=2):
+        if all(c.value in (None, "") for c in r):
+            continue
+        d = {COLS[i]: (r[i].value if i < len(r) else None) for i in range(len(COLS))}
+        url_cell = r[COLS.index("URL")]
+        if url_cell.hyperlink:
+            d["URL"] = url_cell.hyperlink.target
+        rows.append(d)
+    return rows
+
+
+def _write_rows(ws, rows: list[dict]) -> None:
+    """Clear the data area and rewrite the given rows with formatting."""
+    if ws.max_row > 1:
+        ws.delete_rows(2, ws.max_row - 1)
+    for d in rows:
+        row_idx = ws.max_row + 1
+        fill = _PRIORITY_FILL.get(d.get("Priority"))
+        for i, col in enumerate(COLS, 1):
+            cell = ws.cell(row=row_idx, column=i, value=d.get(col))
+            if fill:
+                cell.fill = fill
+            if col == "URL" and d.get("URL"):
+                cell.hyperlink = d["URL"]
+                cell.font = Font(color="0563C1", underline="single")
+    ws.auto_filter.ref = ws.dimensions
 
 
 def update_tracker(path: str | Path, listings: list[Listing]) -> dict:
-    """Add non-duplicate listings to the tracker. Returns counts."""
+    """Add non-duplicate listings, then sort the sheet by Found On (newest first)
+    and priority (High→Low) so today's HIGH listings sit at the top."""
     wb = load_or_create(path)
     ws = wb[FLATS_SHEET]
     today = date.today().isoformat()
-    seen = _existing_urls(ws)
+
+    existing = _read_rows(ws)
+    seen = {str(d.get("URL", "")).strip() for d in existing}
     new_urls: set[str] = set()
     dupes = 0
-
+    new_rows: list[dict] = []
     for listing in listings:
         url = listing.url.strip()
         if not url or url in seen:
             dupes += 1
             continue
-        _append(ws, listing, today)
+        new_rows.append(_values(listing, today))
         seen.add(url)
         new_urls.add(url)
 
-    ws.auto_filter.ref = ws.dimensions
+    all_rows = existing + new_rows
+    # Found On descending, then priority (High first). reverse=True on the tuple
+    # gives newest date first and, within a date, High (−0) before Low (−2).
+    all_rows.sort(
+        key=lambda d: (str(d.get("Found On") or ""), -_PRANK.get(d.get("Priority"), 3)),
+        reverse=True,
+    )
+    _write_rows(ws, all_rows)
+
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
     return {"added": len(new_urls), "duplicates": dupes, "new_urls": new_urls}
