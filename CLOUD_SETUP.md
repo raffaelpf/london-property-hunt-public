@@ -6,8 +6,13 @@ The original skill (`skill.md`) is designed to run **locally** with the
 Code web/cloud session** instead — fetching pages over HTTP through the
 environment's agent proxy (no browser required).
 
-> **Current scope:** scrape → dedup → prioritise → update the Excel tracker →
-> print a summary in chat. **No email is sent yet** (that's a later add-on).
+> **Scope:** search → dedup → prioritise → write the Excel tracker (committed to
+> the repo) → print a summary in chat. **No email is sent** (deferred add-on).
+>
+> **Current search (see `config.md`):** whole **1–2 bed flats**, **£3,000–£4,500**,
+> in central London (Soho, Waterloo, Farringdon, Covent Garden, Southwark,
+> Bloomsbury), with a **balcony/terrace** and **unfurnished / part-furnished /
+> flexible** furnishing, preferring **> 650 sq ft**.
 
 ---
 
@@ -19,73 +24,71 @@ environment's agent proxy (no browser required).
 |---|---|
 | `scraper/config.py` | Parse `config.md` (`KEY=value` blocks) |
 | `scraper/fetch.py` | HTTP fetch through the agent proxy (`HTTPS_PROXY` + CA bundle) |
-| `scraper/platforms/` | Per-site parse: SpareRoom (`data-listing-*`), OpenRent (DOM), Rightmove (`__NEXT_DATA__`), Zoopla (JSON-LD) |
-| `scraper/prioritise.py` | HIGH/MEDIUM/LOW + the mandatory 4+‑bed skip and age flags |
-| `scraper/tracker.py` | `openpyxl` read/write with URL dedup + coloured rows (schema in `tracker/README.md`) |
-| `scraper/outreach.py` | A `<100`‑word `.txt` message per HIGH listing |
+| `scraper/platforms/` | Rightmove (`__NEXT_DATA__`), OnTheMarket (`__NEXT_DATA__` + detail enrich), OpenRent (DOM + detail enrich) |
+| `scraper/features.py` | Classify outdoor space (private / communal / juliet / none), furnishing, size from listing text |
+| `scraper/prioritise.py` | HIGH/MEDIUM/LOW; drops out-of-budget / out-of-bed-range; balcony & furnishing flagged not dropped |
+| `scraper/tracker.py` | `openpyxl` `Flats` sheet with URL dedup + coloured rows |
+| `scraper/outreach.py` | A `<100`‑word `.txt` enquiry per HIGH listing |
 
-> **Why HTTP, not a browser?** The listing data is server-rendered / embedded
-> in the HTML, so no JS execution is needed. Playwright's headless Chromium also
-> can't open a CONNECT tunnel through this environment's proxy (the tunnel is
-> reset), whereas `urllib`/`curl` work — so we fetch over HTTP.
+> **Why HTTP, not a browser?** Listing data is server-rendered / embedded in the
+> HTML, so no JS execution is needed. Playwright's headless Chromium also can't
+> open a CONNECT tunnel through this environment's proxy (the tunnel resets),
+> whereas `urllib`/`curl` work — so we fetch over HTTP.
 
-The tracker `.xlsx` is intended to live in **OneDrive** (via the Microsoft 365
-connector): the agent downloads it before a run and uploads the updated file
-after. Locally, `--tracker` points at any path.
+**Two-stage per platform:** a filtered search returns candidates; then for
+OnTheMarket/OpenRent the detail page is fetched and its full description run
+through `features.analyze_text` to confirm balcony/terrace, furnishing and size.
+Rightmove exposes those in search results (`keyFeatures`, keyword-match flags,
+`displaySize`), so it needs no detail fetch.
+
+### Priority rules
+
+- **Drop:** price outside £3–4.5k, or bedrooms outside 1–2.
+- **HIGH:** target area + private balcony/terrace + furnish ok + (≥ 650 sq ft or size unknown).
+- **MEDIUM:** target area + private/communal outdoor space.
+- **LOW (kept + flagged):** balcony/terrace unconfirmed ("verify"), Juliet only, or
+  listed **furnished** (some landlords are flexible — kept so nothing is missed).
+
+### The tracker
+
+Committed at **`tracker/london_flat_hunt.xlsx`** (un-ignored in `.gitignore`).
+Each run updates it in place and it is committed to the repo, so it's versioned
+and viewable on GitHub. Dedup is by listing URL — safe to run repeatedly.
 
 ---
 
-## Prerequisites (set on claude.ai — not from inside the container)
+## Prerequisites
 
-1. **Network policy** — the four property domains are blocked by default. Open
-   this environment's network policy on **claude.ai/code** to allow
-   `rightmove.co.uk`, `zoopla.co.uk`, `spareroom.co.uk`, `openrent.co.uk`
-   (or unrestricted outbound). Verify with:
+1. **Network policy** — the property domains must be allowed by this
+   environment's egress policy (set on **claude.ai/code**). Verify:
    ```bash
-   curl -sS -o /dev/null -w '%{http_code}\n' https://www.spareroom.co.uk/robots.txt   # want 200
+   curl -sS -o /dev/null -w '%{http_code}\n' https://www.rightmove.co.uk/robots.txt   # want 200
    ```
-2. **Microsoft 365 connector** — enable it *in this chat* (connector settings)
-   so the agent can read/write the tracker in OneDrive.
 
-## Install
+## Install & run
 
 ```bash
-pip install -r requirements.txt   # openpyxl + beautifulsoup4
+pip install -r requirements.txt          # openpyxl + beautifulsoup4
+cp config.example.md config.md           # then edit your details
+python run_hunt.py                        # all sources
+python run_hunt.py --platforms Rightmove --debug-dir debug --limit 20   # narrow test
 ```
 
-## Configure
-
-```bash
-cp config.example.md config.md   # then edit your details + SpareRoom URLs
-```
-
-## Run
-
-```bash
-# Start narrow to confirm scraping works, then widen:
-python run_hunt.py --platforms SpareRoom,OpenRent --debug-dir debug
-
-# Full run:
-python run_hunt.py
-```
-
-Useful flags: `--platforms` (subset), `--limit N` (cap per search),
-`--debug-dir DIR` (dump fetched HTML for selector fixes),
-`--tracker PATH`, `--config PATH`.
-
-Verified live: SpareRoom, OpenRent, and Rightmove return listings; **Zoopla is
-blocked by Cloudflare (403)** for non-interactive clients and is skipped.
+Flags: `--platforms` (subset), `--limit N` (cap per search), `--debug-dir DIR`
+(dump fetched HTML for selector fixes), `--tracker PATH`, `--config PATH`.
 
 ---
 
 ## Notes & caveats
 
-- **Anti-bot blocking is the main risk.** Rightmove/Zoopla/SpareRoom fingerprint
-  headless + datacenter traffic. Each platform is isolated — if one is blocked
+- **Sources:** Rightmove + OnTheMarket + OpenRent. **Zoopla is disabled**
+  (Cloudflare 403s non-interactive clients); SpareRoom removed (rooms-only).
+  OnTheMarket (per-area) is the main workhorse; Rightmove is London-wide +
+  post-filtered to target areas (lower yield); OpenRent is a bonus.
+- **Furnishing "flexible" caveat:** Rightmove is URL-filtered to
+  unfurnished/part-furnished, so a *flexible* listing tagged "furnished" there
+  can be missed; OnTheMarket/OpenRent furnished listings are kept as LOW+flagged.
+- **Selectors/JSON shapes can drift.** Each platform is isolated — if one breaks
   the run still completes and reports the error. Use `--debug-dir` to capture
-  the served HTML and adjust the parser in `scraper/platforms/`.
-- **Selectors will drift.** The DOM/JSON shapes here are best-effort and should
-  be validated on the first live run; expect to tweak `scraper/platforms/*`.
-- **No Gmail in this org.** Email (when re-enabled) would go via Outlook
-  (Microsoft 365), not Gmail.
-- **Idempotent.** Dedup is by listing URL, so it's safe to run repeatedly.
+  HTML and adjust `scraper/platforms/*`.
+- **Idempotent.** Dedup by listing URL.

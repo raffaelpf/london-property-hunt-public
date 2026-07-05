@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""London property hunt — cloud entrypoint.
+"""London flat hunt — cloud entrypoint (Revision 2).
 
-Scrapes the configured platforms, deduplicates against the Excel tracker,
-assigns priorities, writes outreach files for HIGH listings, and prints a
-summary. Does NOT send email (that step is deferred).
+Searches Rightmove + OnTheMarket + OpenRent for 1–2 bed flats in the configured
+central areas and budget, enriches candidates from detail pages to detect
+balcony/terrace + furnishing + size, deduplicates against the Excel tracker,
+prioritises, and prints a summary. Does NOT send email.
 
 Usage:
-    python run_hunt.py                         # all platforms, config.md
-    python run_hunt.py --platforms SpareRoom,OpenRent --debug-dir /tmp/dbg
-    python run_hunt.py --tracker /path/london_room_hunt.xlsx
+    python run_hunt.py                          # all platforms, config.md
+    python run_hunt.py --platforms Rightmove --debug-dir debug --limit 20
 """
 
 from __future__ import annotations
@@ -23,60 +23,71 @@ from scraper.config import get_int, load_config
 from scraper.models import Listing
 from scraper.outreach import write_outreach_files
 from scraper.platforms import REGISTRY
-from scraper.prioritise import prioritise
+from scraper.prioritise import _area_tier, prioritise
 from scraper.tracker import update_tracker
 
+MAX_ENRICH = 120  # cap detail-page fetches per run
 
-def _spareroom_area(url: str) -> str:
-    """Infer the area name from a SpareRoom search URL slug."""
-    try:
-        slug = url.split("/london/", 1)[1].split("?", 1)[0].strip("/")
-        return slug.replace("_", " ").title()
-    except Exception:
-        return ""
+
+def _slug(area: str) -> str:
+    return quote(area.strip().lower().replace(" ", "-"))
 
 
 def build_jobs(cfg: dict, platforms: set[str]) -> list[dict]:
-    """Return the list of {platform, url, listing_type, area} search jobs."""
     jobs: list[dict] = []
     areas = cfg.get("PRIMARY_AREAS", []) + cfg.get("SECONDARY_AREAS", [])
-    term = quote(",".join(areas)) if areas else "london"
-    room_budget = get_int(cfg, "ROOM_BUDGET", 1500)
-    studio_budget = get_int(cfg, "STUDIO_BUDGET", 1900)
-
-    if "SpareRoom" in platforms:
-        for u in cfg.get("SPAREROOM_ROOM_URLS", []):
-            jobs.append({"platform": "SpareRoom", "url": u, "type": "room", "area": _spareroom_area(u)})
-        for u in cfg.get("SPAREROOM_STUDIO_URLS", []):
-            jobs.append({"platform": "SpareRoom", "url": u, "type": "studio", "area": _spareroom_area(u)})
-
-    if "OpenRent" in platforms:
-        jobs.append({"platform": "OpenRent", "type": "room", "area": "",
-                     "url": f"https://www.openrent.co.uk/properties-to-rent/london?term={term}"
-                            f"&prices_max={room_budget}&isLive=true&furnishedStatus=1&bedrooms_max=0"})
-        jobs.append({"platform": "OpenRent", "type": "studio", "area": "",
-                     "url": f"https://www.openrent.co.uk/properties-to-rent/london?term={term}"
-                            f"&prices_max={studio_budget}&isLive=true&furnishedStatus=1&bedrooms_max=1"})
+    pmin = get_int(cfg, "PRICE_MIN", 0) or 0
+    pmax = get_int(cfg, "PRICE_MAX", 5000)
+    bmin = get_int(cfg, "MIN_BEDROOMS", 1) or 1
+    bmax = get_int(cfg, "MAX_BEDROOMS", 2) or 2
+    keywords = quote(",".join(cfg.get("FEATURE_MUST", ["balcony", "terrace"])))
 
     if "Rightmove" in platforms:
-        jobs.append({"platform": "Rightmove", "type": "studio", "area": "",
+        # London-wide + filters; results are post-filtered to target areas.
+        jobs.append({"platform": "Rightmove", "type": "flat", "area": "",
                      "url": "https://www.rightmove.co.uk/property-to-rent/find.html?searchType=RENT"
-                            "&locationIdentifier=REGION%5E87490&maxBedrooms=1"
-                            f"&maxPrice={studio_budget}&propertyTypes=flat"
-                            "&letFurnishType=furnished&includeLetAgreed=false"})
+                            "&locationIdentifier=REGION%5E87490"
+                            f"&minBedrooms={bmin}&maxBedrooms={bmax}&minPrice={pmin}&maxPrice={pmax}"
+                            "&propertyTypes=flat&furnishTypes=unfurnished%2CpartFurnished"
+                            f"&keywords={keywords}&includeLetAgreed=false"})
 
-    if "Zoopla" in platforms:
-        jobs.append({"platform": "Zoopla", "type": "studio", "area": "",
-                     "url": f"https://www.zoopla.co.uk/to-rent/flats/london/?beds_max=1"
-                            f"&price_frequency=per_month&price_max={studio_budget}"
-                            "&furnished_state=furnished&results_sort=newest_listings&pn=1"})
+    if "OnTheMarket" in platforms:
+        for area in areas:
+            jobs.append({"platform": "OnTheMarket", "type": "flat", "area": area,
+                         "url": f"https://www.onthemarket.com/to-rent/property/{_slug(area)}/"
+                                f"?max-price={pmax}&min-price={pmin}&min-bedrooms={bmin}&max-bedrooms={bmax}"})
+
+    if "OpenRent" in platforms and areas:
+        term = quote(",".join(areas))
+        jobs.append({"platform": "OpenRent", "type": "flat", "area": "",
+                     "url": f"https://www.openrent.co.uk/properties-to-rent/london?term={term}"
+                            f"&prices_min={pmin}&prices_max={pmax}&bedrooms_min={bmin}&bedrooms_max={bmax}"
+                            "&isLive=true"})
     return jobs
 
 
-def run(cfg: dict, tracker_path: str, outreach_dir: str, platforms: set[str],
-        debug_dir: str | None, limit: int | None) -> dict:
+def _in_scope(listing: Listing, cfg: dict) -> bool:
+    """Cheap pre-filter so we only fetch detail pages for plausible listings."""
+    pmin = get_int(cfg, "PRICE_MIN", 0) or 0
+    pmax = get_int(cfg, "PRICE_MAX")
+    bmin = get_int(cfg, "MIN_BEDROOMS", 0) or 0
+    bmax = get_int(cfg, "MAX_BEDROOMS")
+    if listing.price_pcm is not None:
+        if pmax and listing.price_pcm > pmax:
+            return False
+        if pmin and listing.price_pcm < pmin:
+            return False
+    if listing.bed_count is not None:
+        if bmax is not None and listing.bed_count > bmax:
+            return False
+        if listing.bed_count < bmin:
+            return False
+    return _area_tier(listing, cfg) != "other"
+
+
+def run(cfg, tracker_path, outreach_dir, platforms, debug_dir, limit) -> dict:
     jobs = build_jobs(cfg, platforms)
-    all_listings: list[Listing] = []
+    raw: list[Listing] = []
     per_platform: dict[str, int] = {}
     errors: list[str] = []
 
@@ -86,87 +97,98 @@ def run(cfg: dict, tracker_path: str, outreach_dir: str, platforms: set[str],
             found = module.search(job["url"], cfg, job["type"], debug_dir)
             if limit:
                 found = found[:limit]
-            for listing in found:
-                if not listing.area and job["area"]:
-                    listing.area = job["area"]
+            for l in found:
+                if not l.area and job["area"]:
+                    l.area = job["area"]
             per_platform[job["platform"]] = per_platform.get(job["platform"], 0) + len(found)
-            all_listings.extend(found)
-            print(f"  [{job['platform']}/{job['type']}] {len(found)} listings  ({job['url'][:70]}...)")
-        except Exception as exc:  # isolate: one platform failing must not kill the run
-            errors.append(f"{job['platform']}/{job['type']}: {exc}")
-            print(f"  [{job['platform']}/{job['type']}] ERROR: {exc}", file=sys.stderr)
+            raw.extend(found)
+            print(f"  [{job['platform']}] {len(found)} listings ({job['url'][:64]}...)")
+        except Exception as exc:
+            errors.append(f"{job['platform']}: {exc}")
+            print(f"  [{job['platform']}] ERROR: {exc}", file=sys.stderr)
             if debug_dir:
                 traceback.print_exc()
 
-    # Prioritise + apply hard filters; dedupe within this run by URL.
+    # Dedup within run, pre-filter to in-scope, enrich survivors from detail pages.
+    seen: set[str] = set()
+    candidates: list[Listing] = []
+    for l in raw:
+        u = l.url.strip()
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        if _in_scope(l, cfg):
+            candidates.append(l)
+
+    enriched = 0
+    for l in candidates:
+        module = REGISTRY.get(l.platform)
+        if module and hasattr(module, "enrich") and enriched < MAX_ENRICH:
+            try:
+                module.enrich(l, debug_dir)
+                enriched += 1
+            except Exception:
+                pass
+    if len([c for c in candidates if hasattr(REGISTRY.get(c.platform), "enrich")]) > MAX_ENRICH:
+        print(f"  ⚠️ enrich capped at {MAX_ENRICH}; some listings not detail-checked", file=sys.stderr)
+
     kept: list[Listing] = []
-    seen_urls: set[str] = set()
-    skipped = 0
-    for listing in all_listings:
-        url = listing.url.strip()
-        if not url or url in seen_urls:
+    for l in candidates:
+        p = prioritise(l, cfg)
+        if p is None:
             continue
-        seen_urls.add(url)
-        priority = prioritise(listing, cfg)
-        if priority is None:
-            skipped += 1
-            continue
-        listing.priority = priority
-        kept.append(listing)
+        l.priority = p
+        kept.append(l)
 
     counts = update_tracker(tracker_path, kept)
     outreach_files = write_outreach_files(kept, cfg, outreach_dir)
-
     priorities = {"High": 0, "Medium": 0, "Low": 0}
-    for listing in kept:
-        priorities[listing.priority] = priorities.get(listing.priority, 0) + 1
+    for l in kept:
+        priorities[l.priority] = priorities.get(l.priority, 0) + 1
 
     return {
-        "per_platform": per_platform,
-        "found_total": len(all_listings),
-        "skipped_4bed": skipped,
-        "priorities": priorities,
-        "tracker": counts,
-        "outreach_written": len(outreach_files),
-        "errors": errors,
-        "high_listings": [l for l in kept if l.priority == "High"],
+        "per_platform": per_platform, "raw": len(raw), "candidates": len(candidates),
+        "enriched": enriched, "priorities": priorities, "tracker": counts,
+        "outreach_written": len(outreach_files), "errors": errors, "kept": kept,
     }
 
 
-def print_summary(cfg: dict, res: dict, tracker_path: str) -> None:
-    p = res["priorities"]
-    t = res["tracker"]
-    print("\n" + "=" * 60)
-    print("🏠 LONDON PROPERTY HUNT — RUN SUMMARY")
-    print("=" * 60)
-    print(f"Platforms:      " + ", ".join(f"{k}={v}" for k, v in res["per_platform"].items()) or "none")
-    print(f"Found (raw):    {res['found_total']}")
-    print(f"Skipped (4+ bed rooms): {res['skipped_4bed']}")
+def print_summary(res: dict, tracker_path: str) -> None:
+    p, t = res["priorities"], res["tracker"]
+    print("\n" + "=" * 62)
+    print("🏠 LONDON FLAT HUNT — RUN SUMMARY")
+    print("=" * 62)
+    print("Platforms:      " + (", ".join(f"{k}={v}" for k, v in res["per_platform"].items()) or "none"))
+    print(f"Raw → in-scope: {res['raw']} → {res['candidates']} (enriched {res['enriched']})")
     print(f"Priority:       🟢 HIGH {p['High']} | 🟡 MEDIUM {p['Medium']} | ⚪ LOW {p['Low']}")
-    print(f"Tracker:        +{t['rooms_added']} rooms, +{t['studios_added']} studios, {t['duplicates']} dupes skipped")
-    print(f"Outreach files: {res['outreach_written']} written")
+    print(f"Tracker:        +{t['added']} added, {t['duplicates']} duplicates skipped")
+    print(f"Outreach files: {res['outreach_written']}")
     print(f"Tracker file:   {tracker_path}")
     if res["errors"]:
         print(f"\n⚠️  {len(res['errors'])} platform error(s):")
         for e in res["errors"]:
             print(f"   - {e}")
-    if res["high_listings"]:
-        print("\n🟢 Top HIGH listings:")
-        for l in res["high_listings"][:8]:
+    ranked = sorted(res["kept"], key=lambda l: {"High": 0, "Medium": 1, "Low": 2}[l.priority])
+    if ranked:
+        print("\nTop listings:")
+        from scraper.features import OUTDOOR_LABELS
+        for l in ranked[:12]:
             price = f"£{l.price_pcm}" if l.price_pcm else "£?"
-            print(f"   • [{l.platform}] {l.title[:50]} | {l.area or '?'} | {price} | {l.url}")
-    print("=" * 60)
+            size = f"{l.size_sqft}sqft" if l.size_sqft else "size?"
+            print(f"   [{l.priority[:1]}] {l.platform:11} | {l.bed_label or '?':6} | {price:6} | "
+                  f"{OUTDOOR_LABELS.get(l.outdoor):24} | {size:8} | {l.area[:24]}")
+            print(f"       {l.url}")
+    print("=" * 62)
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Run the London property hunt.")
-    ap.add_argument("--config", default=None, help="Path to config.md (falls back to config.example.md)")
-    ap.add_argument("--tracker", default=None, help="Path to london_room_hunt.xlsx")
-    ap.add_argument("--outreach-dir", default=None, help="Directory for outreach .txt files")
-    ap.add_argument("--platforms", default="SpareRoom,OpenRent,Rightmove,Zoopla",
-                    help="Comma-separated subset of platforms to run")
-    ap.add_argument("--debug-dir", default=None, help="Dump fetched HTML here for selector debugging")
-    ap.add_argument("--limit", type=int, default=None, help="Cap listings per search (testing)")
+    ap = argparse.ArgumentParser(description="Run the London flat hunt.")
+    ap.add_argument("--config", default=None)
+    ap.add_argument("--tracker", default=None)
+    ap.add_argument("--outreach-dir", default=None)
+    ap.add_argument("--platforms", default="Rightmove,OnTheMarket,OpenRent")
+    ap.add_argument("--debug-dir", default=None)
+    ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()
 
     repo = Path(__file__).parent
@@ -174,17 +196,12 @@ def main() -> int:
     cfg = load_config(config_path)
     print(f"Config: {config_path}")
 
-    hunt_dir = cfg.get("YOUR_HUNT_DIR", "").strip()
-    default_tracker = (
-        Path(hunt_dir).expanduser() / "london_room_hunt.xlsx" if hunt_dir
-        else repo / "tracker" / "london_room_hunt.xlsx"
-    )
-    tracker_path = str(args.tracker or default_tracker)
+    tracker_path = str(args.tracker or (repo / "tracker" / "london_flat_hunt.xlsx"))
     outreach_dir = str(args.outreach_dir or (repo / "outreach"))
     platforms = {p.strip() for p in args.platforms.split(",") if p.strip()}
 
     res = run(cfg, tracker_path, outreach_dir, platforms, args.debug_dir, args.limit)
-    print_summary(cfg, res, tracker_path)
+    print_summary(res, tracker_path)
     return 0
 
 

@@ -8,6 +8,9 @@ outreach/*.html
 *.xlsm
 *.csv
 
+# ...but DO track the committed flat-hunt tracker
+!tracker/london_flat_hunt.xlsx
+
 # Debug HTML dumps from --debug-dir
 debug/
 

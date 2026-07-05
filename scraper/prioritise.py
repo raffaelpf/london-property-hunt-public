@@ -1,8 +1,10 @@
-"""Assign HIGH / MEDIUM / LOW priority and apply hard filters.
+"""Assign HIGH / MEDIUM / LOW priority for flat listings, and apply hard filters.
 
-Rules ported verbatim from ``README.md`` (Priority logic) and ``skill.md``
-(bed-count + age filters). Kept deliberately simple and rule-based so a daily
-unattended run is deterministic.
+Rules (Revision 2 — Raffael's flat search):
+- Hard filters (return None → drop): out of £3–4.5k range, or bedrooms outside 1–2.
+- Outdoor space is a MUST but *include-but-flag*: never dropped, only downgraded.
+  private balcony/terrace → HIGH-eligible; communal → MEDIUM; juliet/none → LOW (flagged).
+- Size > MIN_SQFT boosts; unknown size never penalised.
 """
 
 from __future__ import annotations
@@ -10,15 +12,8 @@ from __future__ import annotations
 from .config import get_int
 from .models import Listing
 
-# Keywords that mark a shared flat as young/student -> LOW (never HIGH).
-_YOUNG_KEYWORDS = (
-    "student", "students", "under 25", "under-25", "under 30", "18-25",
-    "18 - 25", "young household", "recent graduate",
-)
-
 
 def _area_tier(listing: Listing, cfg: dict) -> str:
-    """Return 'primary', 'secondary', or 'other' for the listing's location."""
     text = " ".join((listing.area, listing.postcode, listing.title)).lower()
     for area in cfg.get("PRIMARY_AREAS", []):
         if area.lower() in text:
@@ -29,70 +24,56 @@ def _area_tier(listing: Listing, cfg: dict) -> str:
     return "other"
 
 
-def _is_young_household(listing: Listing) -> bool:
-    text = listing.combined_text()
-    return any(kw in text for kw in _YOUNG_KEYWORDS)
-
-
-def classify_room(listing: Listing, cfg: dict) -> str | None:
-    """Priority for a room listing, or ``None`` to skip it entirely.
-
-    Hard filter: properties with 4+ bedrooms are skipped (``None``).
-    Unknown bed count is kept, with a note added by the caller.
-    """
-    if listing.bed_count is not None and listing.bed_count >= 4:
-        return None  # MANDATORY skip: too many bedrooms
-
-    budget = get_int(cfg, "ROOM_BUDGET")
-    budget_no_bills = get_int(cfg, "ROOM_BUDGET_NO_BILLS", budget)
-    tier = _area_tier(listing, cfg)
-    within_budget = listing.price_pcm is None or (
-        listing.price_pcm <= (budget_no_bills or listing.price_pcm)
-    )
-    tight_budget = listing.price_pcm is None or (
-        listing.price_pcm <= (budget or listing.price_pcm)
-    )
-    furnished_ok = listing.furnished != "No"
-    young = _is_young_household(listing)
-
-    if tier == "primary" and tight_budget and furnished_ok and not young:
-        return "High"
-    if tier in ("primary", "secondary") and within_budget:
-        return "Medium"
-    return "Low"
-
-
-def classify_studio(listing: Listing, cfg: dict) -> str:
-    """Priority for a studio / 1-bed listing. No bed-count restriction."""
-    budget = get_int(cfg, "STUDIO_BUDGET")
-    tier = _area_tier(listing, cfg)
-    within_budget = listing.price_pcm is None or (
-        listing.price_pcm <= (budget or listing.price_pcm)
-    )
-    furnished_ok = listing.furnished != "No"
-
-    if tier == "primary" and within_budget and furnished_ok:
-        return "High"
-    if tier in ("primary", "secondary") and within_budget:
-        return "Medium"
-    return "Low"
-
-
 def prioritise(listing: Listing, cfg: dict) -> str | None:
-    """Dispatch to the right classifier. ``None`` means skip (don't add)."""
-    if listing.listing_type == "studio":
-        return classify_studio(listing, cfg)
-    priority = classify_room(listing, cfg)
-    # Annotate unknowns so the human knows to verify before messaging.
-    if priority is not None:
-        if listing.bed_count is None:
-            _append_note(listing, "Verify ≤3 bed before messaging")
-        if _is_young_household(listing):
-            _append_note(listing, "Young/student household — verify")
-    return priority
+    """Return High/Medium/Low, or None to drop the listing."""
+    price_min = get_int(cfg, "PRICE_MIN", 0) or 0
+    price_max = get_int(cfg, "PRICE_MAX")
+    min_beds = get_int(cfg, "MIN_BEDROOMS", 0) or 0
+    max_beds = get_int(cfg, "MAX_BEDROOMS")
+    min_sqft = get_int(cfg, "MIN_SQFT")
+
+    # Hard filters -------------------------------------------------------
+    if listing.price_pcm is not None:
+        if price_max and listing.price_pcm > price_max:
+            return None
+        if price_min and listing.price_pcm < price_min:
+            return None
+    if listing.bed_count is not None:
+        if max_beds is not None and listing.bed_count > max_beds:
+            return None
+        if listing.bed_count < min_beds:
+            return None
+
+    tier = _area_tier(listing, cfg)
+    big_enough = listing.size_sqft is None or (min_sqft is None) or listing.size_sqft >= min_sqft
+    furnish_ok = listing.furnishing in ("unfurnished", "part-furnished", "flexible", "unknown", "")
+
+    # Flag notes for the human -----------------------------------------
+    if listing.outdoor in ("juliet", "none"):
+        _note(listing, "verify balcony/terrace")
+    elif listing.outdoor == "communal":
+        _note(listing, "outdoor space is communal/shared")
+    if listing.size_sqft is None:
+        _note(listing, "size not stated")
+    elif min_sqft and listing.size_sqft < min_sqft:
+        _note(listing, f"under {min_sqft} sq ft")
+    if listing.furnishing == "furnished":
+        _note(listing, "listed furnished — check if flexible")
+
+    # Priority ----------------------------------------------------------
+    # Furnishing is a MUST (unfurnished/part/flexible). A listing that reads as
+    # plainly "furnished" is kept but capped at LOW (detection isn't perfect —
+    # it may actually be flexible), everything else tiers normally.
+    if not furnish_ok:
+        return "Low"
+    if listing.outdoor == "private" and tier != "other" and big_enough:
+        return "High"
+    if listing.outdoor in ("private", "communal") and tier != "other":
+        return "Medium"
+    return "Low"
 
 
-def _append_note(listing: Listing, note: str) -> None:
-    if note.lower() in listing.notes.lower():
+def _note(listing: Listing, note: str) -> None:
+    if note.lower() in (listing.notes or "").lower():
         return
     listing.notes = f"{listing.notes}; {note}".lstrip("; ") if listing.notes else note

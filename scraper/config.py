@@ -13,7 +13,7 @@ from pathlib import Path
 # Keys whose value is a list of URLs spread across the following lines.
 _URL_LIST_KEYS = {"SPAREROOM_ROOM_URLS", "SPAREROOM_STUDIO_URLS"}
 # Keys whose value is a comma-separated list.
-_CSV_KEYS = {"PRIMARY_AREAS", "SECONDARY_AREAS"}
+_CSV_KEYS = {"PRIMARY_AREAS", "SECONDARY_AREAS", "FEATURE_MUST", "FURNISH_FILTER"}
 
 _KV_RE = re.compile(r"^([A-Z][A-Z0-9_]*)\s*=\s*(.*)$")
 

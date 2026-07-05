@@ -21,12 +21,17 @@ class Listing:
     price_pcm: Optional[int] = None
     bills_included: str = "Unknown"   # Yes / No / Unknown
     available_from: str = ""
-    furnished: str = "Unknown"        # Yes / No / Unknown
-    bed_count: Optional[int] = None   # total bedrooms in property (rooms only)
-    bed_label: str = ""               # "Studio" / "1-Bed" (studios sheet)
+    furnished: str = "Unknown"        # Yes / No / Unknown (legacy room field)
+    bed_count: Optional[int] = None   # bedrooms
+    bed_label: str = ""               # "Studio" / "1-Bed" / "2-Bed"
     flatmates: str = ""
     contact: str = ""
     notes: str = ""
+
+    # Flat-search fields (Revision 2)
+    furnishing: str = "unknown"       # unfurnished / part-furnished / flexible / furnished / unknown
+    outdoor: str = "none"             # private / communal / juliet / none
+    size_sqft: Optional[int] = None
 
     priority: str = ""                # set by prioritise.py: High / Medium / Low
 
