@@ -19,7 +19,6 @@ import traceback
 from pathlib import Path
 from urllib.parse import quote
 
-from scraper.browser import browser_context
 from scraper.config import get_int, load_config
 from scraper.models import Listing
 from scraper.outreach import write_outreach_files
@@ -75,30 +74,29 @@ def build_jobs(cfg: dict, platforms: set[str]) -> list[dict]:
 
 
 def run(cfg: dict, tracker_path: str, outreach_dir: str, platforms: set[str],
-        debug_dir: str | None, limit: int | None, headful: bool) -> dict:
+        debug_dir: str | None, limit: int | None) -> dict:
     jobs = build_jobs(cfg, platforms)
     all_listings: list[Listing] = []
     per_platform: dict[str, int] = {}
     errors: list[str] = []
 
-    with browser_context(headless=not headful) as ctx:
-        for job in jobs:
-            module = REGISTRY[job["platform"]]
-            try:
-                found = module.search(ctx, job["url"], cfg, job["type"], debug_dir)
-                if limit:
-                    found = found[:limit]
-                for listing in found:
-                    if not listing.area and job["area"]:
-                        listing.area = job["area"]
-                per_platform[job["platform"]] = per_platform.get(job["platform"], 0) + len(found)
-                all_listings.extend(found)
-                print(f"  [{job['platform']}/{job['type']}] {len(found)} listings  ({job['url'][:70]}...)")
-            except Exception as exc:  # isolate: one platform failing must not kill the run
-                errors.append(f"{job['platform']}/{job['type']}: {exc}")
-                print(f"  [{job['platform']}/{job['type']}] ERROR: {exc}", file=sys.stderr)
-                if debug_dir:
-                    traceback.print_exc()
+    for job in jobs:
+        module = REGISTRY[job["platform"]]
+        try:
+            found = module.search(job["url"], cfg, job["type"], debug_dir)
+            if limit:
+                found = found[:limit]
+            for listing in found:
+                if not listing.area and job["area"]:
+                    listing.area = job["area"]
+            per_platform[job["platform"]] = per_platform.get(job["platform"], 0) + len(found)
+            all_listings.extend(found)
+            print(f"  [{job['platform']}/{job['type']}] {len(found)} listings  ({job['url'][:70]}...)")
+        except Exception as exc:  # isolate: one platform failing must not kill the run
+            errors.append(f"{job['platform']}/{job['type']}: {exc}")
+            print(f"  [{job['platform']}/{job['type']}] ERROR: {exc}", file=sys.stderr)
+            if debug_dir:
+                traceback.print_exc()
 
     # Prioritise + apply hard filters; dedupe within this run by URL.
     kept: list[Listing] = []
@@ -169,7 +167,6 @@ def main() -> int:
                     help="Comma-separated subset of platforms to run")
     ap.add_argument("--debug-dir", default=None, help="Dump fetched HTML here for selector debugging")
     ap.add_argument("--limit", type=int, default=None, help="Cap listings per search (testing)")
-    ap.add_argument("--headful", action="store_true", help="Run with a visible browser")
     args = ap.parse_args()
 
     repo = Path(__file__).parent
@@ -186,7 +183,7 @@ def main() -> int:
     outreach_dir = str(args.outreach_dir or (repo / "outreach"))
     platforms = {p.strip() for p in args.platforms.split(",") if p.strip()}
 
-    res = run(cfg, tracker_path, outreach_dir, platforms, args.debug_dir, args.limit, args.headful)
+    res = run(cfg, tracker_path, outreach_dir, platforms, args.debug_dir, args.limit)
     print_summary(cfg, res, tracker_path)
     return 0
 

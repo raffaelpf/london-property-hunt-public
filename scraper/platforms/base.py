@@ -1,78 +1,66 @@
-"""Shared helpers for platform parsers: navigation, JSON extraction, parsing."""
+"""Shared helpers for platform parsers: HTML/JSON extraction and field parsing.
+
+Operates on HTML strings (fetched via :mod:`scraper.fetch`), not a live browser.
+"""
 
 from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 from typing import Any, Iterator
+
+from bs4 import BeautifulSoup
 
 # London postcode district, e.g. "E8", "SE11", "SW1A".
 _POSTCODE_RE = re.compile(r"\b([A-Z]{1,2}\d[A-Z\d]?)\b")
-_ACCEPT_COOKIE_SELECTORS = [
-    "button:has-text('Accept all')",
-    "button:has-text('Accept All')",
-    "button:has-text('Accept')",
-    "button:has-text('I Accept')",
-    "button:has-text('Agree')",
-    "#onetrust-accept-btn-handler",
-    "[data-testid='cookie-accept-all']",
-]
+_NEXT_DATA_RE = re.compile(
+    r'<script[^>]*id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', re.S
+)
+_JSONLD_RE = re.compile(
+    r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', re.S
+)
 
 
-def goto(page, url: str, wait_ms: int = 2000) -> None:
-    """Navigate, dismiss a cookie banner if present, and settle."""
-    page.goto(url, wait_until="domcontentloaded")
-    for sel in _ACCEPT_COOKIE_SELECTORS:
-        try:
-            btn = page.query_selector(sel)
-            if btn and btn.is_visible():
-                btn.click(timeout=2000)
-                break
-        except Exception:
-            continue
-    try:
-        page.wait_for_load_state("networkidle", timeout=wait_ms + 6000)
-    except Exception:
-        page.wait_for_timeout(wait_ms)
+def soup(html: str) -> BeautifulSoup:
+    return BeautifulSoup(html, "html.parser")
 
 
-def dump_html(page, debug_dir: str | Path | None, name: str) -> None:
-    """Save the current page HTML for offline selector debugging."""
-    if not debug_dir:
-        return
-    d = Path(debug_dir)
-    d.mkdir(parents=True, exist_ok=True)
-    safe = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:80]
-    (d / f"{safe}.html").write_text(page.content(), encoding="utf-8")
+# ---- embedded-JSON extraction -------------------------------------------
 
-
-def next_data(page) -> dict | None:
-    """Return the parsed ``__NEXT_DATA__`` JSON blob, if present."""
-    el = page.query_selector("#__NEXT_DATA__")
-    if not el:
+def next_data(html: str) -> dict | None:
+    """Parse the ``__NEXT_DATA__`` script blob, if present."""
+    m = _NEXT_DATA_RE.search(html)
+    if not m:
         return None
     try:
-        return json.loads(el.inner_text())
+        return json.loads(m.group(1).strip())
     except Exception:
         return None
 
 
-def json_ld_blocks(page) -> list[Any]:
-    """Return all parsed ``application/ld+json`` blocks on the page."""
-    blocks = []
-    for el in page.query_selector_all("script[type='application/ld+json']"):
+def json_ld_blocks(html: str) -> list[Any]:
+    """Return all parsed ``application/ld+json`` blocks."""
+    out = []
+    for m in _JSONLD_RE.finditer(html):
         try:
-            blocks.append(json.loads(el.inner_text()))
+            out.append(json.loads(m.group(1).strip()))
         except Exception:
             continue
-    return blocks
+    return out
 
 
-def js_var(page, var_name: str) -> Any | None:
-    """Read a page JS variable (e.g. Rightmove's ``window.jsonModel``)."""
+def js_var(html: str, name: str) -> Any | None:
+    """Extract a JS assignment like ``window.jsonModel = {...}`` as JSON.
+
+    Uses ``JSONDecoder.raw_decode`` from the opening brace so braces inside
+    strings are handled correctly.
+    """
+    m = re.search(re.escape(name) + r"\s*[:=]\s*(\{)", html)
+    if not m:
+        return None
     try:
-        return page.evaluate(f"() => window.{var_name} ?? null")
+        obj, _ = json.JSONDecoder().raw_decode(html[m.start(1):])
+        return obj
     except Exception:
         return None
 
@@ -104,7 +92,7 @@ def find_list_of_dicts(root: Any, must_have_keys: set[str]) -> list[dict]:
 
 def parse_price_pcm(text: str | None) -> int | None:
     """Parse a price into £/month. Converts weekly rents to monthly."""
-    if not text:
+    if text is None:
         return None
     text = str(text)
     m = re.search(r"£?\s*([\d,]+)", text)
@@ -113,7 +101,7 @@ def parse_price_pcm(text: str | None) -> int | None:
     amount = int(m.group(1).replace(",", ""))
     if re.search(r"p\.?w|per week|/week|pw\b", text, re.I):
         amount = round(amount * 52 / 12)
-    return amount
+    return amount or None
 
 
 def parse_beds(text: str | None) -> int | None:

@@ -1,59 +1,66 @@
-"""SpareRoom search parser (DOM-based — no structured JSON exposed)."""
+"""SpareRoom search parser.
+
+Each result is ``<li class="listing-result">`` carrying rich ``data-listing-*``
+attributes (id, url, title, neighbourhood, postcode, rooms-in-property,
+normalised rate + period) — we read those directly.
+"""
 
 from __future__ import annotations
 
+import re
+
+from ..fetch import dump_html, fetch_html
 from ..models import Listing
 from . import base
 
-# Collect each result card's link + text in one JS call (robust to layout tweaks).
-_EXTRACT_JS = """
-() => {
-  const out = [];
-  const seen = new Set();
-  document.querySelectorAll("a[href*='flatshare_detail']").forEach(a => {
-    const href = a.href.split('#')[0].split('?')[0] + (a.href.includes('flatshare_id=')
-      ? '?' + a.href.split('?')[1].split('&').find(p => p.startsWith('flatshare_id=')) : '');
-    if (seen.has(href)) return; seen.add(href);
-    const card = a.closest('article, li') || a.parentElement;
-    out.push({
-      href,
-      title: (a.innerText || card?.querySelector('h2,h3')?.innerText || '').trim(),
-      text: (card?.innerText || '').trim(),
-    });
-  });
-  return out;
-}
-"""
+_BASE = "https://www.spareroom.co.uk"
 
 
-def search(context, url: str, cfg: dict, listing_type: str = "room", debug_dir=None) -> list[Listing]:
-    page = context.new_page()
-    try:
-        base.goto(page, url)
-        base.dump_html(page, debug_dir, f"spareroom-{listing_type}")
-        raw = page.evaluate(_EXTRACT_JS) or []
-    finally:
-        page.close()
+def _abs(url: str) -> str:
+    if not url:
+        return ""
+    return url if url.startswith("http") else _BASE + url
 
+
+def search(url: str, cfg: dict, listing_type: str = "room", debug_dir=None) -> list[Listing]:
+    status, html = fetch_html(url)
+    dump_html(debug_dir, f"spareroom-{listing_type}", html)
+    if status != 200:
+        raise RuntimeError(f"HTTP {status}")
+
+    s = base.soup(html)
     listings: list[Listing] = []
-    for item in raw:
-        href, title, text = item.get("href"), base.clean(item.get("title")), item.get("text", "")
+    for card in s.select("li.listing-result"):
+        d = card.attrs
+        href = d.get("data-listing-url") or ""
+        if not href:
+            link = card.find("a", href=True)
+            href = link["href"] if link else ""
         if not href:
             continue
+
+        rate = d.get("data-listing-ad-rate-normalised") or d.get("data-listing-ad-headline-rate")
+        period = d.get("data-listing-ad-rate-normalised-period") or d.get("data-listing-ad-headline-rate-period") or ""
+        rooms = d.get("data-listing-rooms-in-property")
+        card_text = base.clean(card.get_text())
+        avail = re.search(r"Available\s+([A-Za-z0-9 ]+?)(?:\s*[-–]|\s{2,}|$)", card_text)
+
         listings.append(
             Listing(
-                title=title or "SpareRoom listing",
+                title=base.clean(d.get("data-listing-title")) or "SpareRoom listing",
                 platform="SpareRoom",
-                url=href,
+                url=_abs(href),
                 listing_type=listing_type,
-                area="",  # filled from search URL by the orchestrator
-                postcode=base.extract_postcode(text),
-                price_pcm=base.parse_price_pcm(text),
-                furnished="Yes" if "furnished" in text.lower() else "Unknown",
-                bills_included="Yes" if "bills inc" in text.lower() else "Unknown",
-                bed_count=base.parse_beds(text) if listing_type == "room" else None,
+                area=base.clean(d.get("data-listing-neighbourhood")),
+                postcode=base.clean(d.get("data-listing-postcode")),
+                price_pcm=base.parse_price_pcm(f"{rate} {period}" if rate else None),
+                bills_included="Yes" if "bills inc" in card_text.lower() else "Unknown",
+                available_from=base.clean(avail.group(1)) if avail else "",
+                furnished="Yes" if "furnished" in card_text.lower() else "Unknown",
+                bed_count=int(rooms) if (rooms and rooms.isdigit() and listing_type == "room") else None,
                 bed_label="Studio" if listing_type == "studio" else "",
-                notes=base.clean(text)[:180],
+                flatmates=base.clean(d.get("data-listing-advertiser-role")),
+                notes=card_text[:180],
             )
         )
     return listings

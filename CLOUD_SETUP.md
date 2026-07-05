@@ -3,7 +3,8 @@
 The original skill (`skill.md`) is designed to run **locally** with the
 "Claude in Chrome" extension + a Gmail connector. This directory adds a
 **self-contained Python pipeline** so the hunt can run **entirely in a Claude
-Code web/cloud session** instead — using the pre-installed headless Chromium.
+Code web/cloud session** instead — fetching pages over HTTP through the
+environment's agent proxy (no browser required).
 
 > **Current scope:** scrape → dedup → prioritise → update the Excel tracker →
 > print a summary in chat. **No email is sent yet** (that's a later add-on).
@@ -17,11 +18,16 @@ Code web/cloud session** instead — using the pre-installed headless Chromium.
 | Module | Role |
 |---|---|
 | `scraper/config.py` | Parse `config.md` (`KEY=value` blocks) |
-| `scraper/browser.py` | Launch the pre-installed headless Chromium (`/opt/pw-browsers`) |
-| `scraper/platforms/` | Per-site search + parse: SpareRoom, OpenRent (DOM); Rightmove, Zoopla (embedded JSON) |
+| `scraper/fetch.py` | HTTP fetch through the agent proxy (`HTTPS_PROXY` + CA bundle) |
+| `scraper/platforms/` | Per-site parse: SpareRoom (`data-listing-*`), OpenRent (DOM), Rightmove (`__NEXT_DATA__`), Zoopla (JSON-LD) |
 | `scraper/prioritise.py` | HIGH/MEDIUM/LOW + the mandatory 4+‑bed skip and age flags |
 | `scraper/tracker.py` | `openpyxl` read/write with URL dedup + coloured rows (schema in `tracker/README.md`) |
 | `scraper/outreach.py` | A `<100`‑word `.txt` message per HIGH listing |
+
+> **Why HTTP, not a browser?** The listing data is server-rendered / embedded
+> in the HTML, so no JS execution is needed. Playwright's headless Chromium also
+> can't open a CONNECT tunnel through this environment's proxy (the tunnel is
+> reset), whereas `urllib`/`curl` work — so we fetch over HTTP.
 
 The tracker `.xlsx` is intended to live in **OneDrive** (via the Microsoft 365
 connector): the agent downloads it before a run and uploads the updated file
@@ -44,8 +50,7 @@ after. Locally, `--tracker` points at any path.
 ## Install
 
 ```bash
-pip install -r requirements.txt   # openpyxl + playwright
-# Do NOT run `playwright install` — Chromium is pre-installed at /opt/pw-browsers
+pip install -r requirements.txt   # openpyxl + beautifulsoup4
 ```
 
 ## Configure
@@ -65,8 +70,11 @@ python run_hunt.py
 ```
 
 Useful flags: `--platforms` (subset), `--limit N` (cap per search),
-`--debug-dir DIR` (dump fetched HTML for selector fixes), `--headful`,
+`--debug-dir DIR` (dump fetched HTML for selector fixes),
 `--tracker PATH`, `--config PATH`.
+
+Verified live: SpareRoom, OpenRent, and Rightmove return listings; **Zoopla is
+blocked by Cloudflare (403)** for non-interactive clients and is skipped.
 
 ---
 
