@@ -182,58 +182,87 @@ def run(cfg, tracker_path, outreach_dir, platforms, debug_dir, limit) -> dict:
     }
 
 
-def print_summary(res: dict, tracker_path: str) -> None:
-    """Emit a clean Markdown summary (relayed verbatim by the scheduled routine)."""
-    from scraper.features import OUTDOOR_LABELS
+def _parse_found(s) -> "datetime | None":
+    from datetime import datetime
+    s = str(s or "").strip()
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
 
-    p, t = res["priorities"], res["tracker"]
+
+def _row_line(r: dict) -> str:
+    price = f"£{r['Price (pcm)']:,}/mo" if isinstance(r.get("Price (pcm)"), int) else "£?"
+    size = f"{r['Size (sqft)']} sqft" if r.get("Size (sqft)") else "size n/a"
+    furn = r.get("Furnishing") or "?"
+    outdoor = r.get("Balcony/Terrace") or "?"
+    return (f"- **{price}** · {r.get('Bedrooms') or '?'} · {size} · {outdoor} · {furn}\n"
+            f"  {r.get('Area') or ''} — [{r.get('Platform')}]({r.get('URL')})")
+
+
+def _by_priority(rows: list, pr: str) -> list:
+    return [r for r in rows if r.get("Priority") == pr]
+
+
+def print_summary(res: dict, tracker_path: str, recent_hours: int = 24) -> None:
+    """Emit a Markdown summary: what's new this run + a rolling recent window.
+
+    Only genuinely new listings are highlighted; the recent window (default 24h)
+    re-surfaces flats from earlier runs so an unread notification isn't missed.
+    Relayed verbatim by the scheduled routine.
+    """
+    from datetime import datetime, timedelta
+
+    t = res["tracker"]
+    rows = t.get("rows") or []
     new_urls = set(t.get("new_urls") or [])
+    total = len(rows)
 
-    def dupe_key(l):
-        # Same flat listed on >1 platform: match on price + beds + location.
-        return (l.price_pcm, l.bed_count, (l.postcode or l.area[:14]).lower())
-
-    def collapse(items: list) -> list:
-        """Merge cross-platform duplicates, keeping one entry with all links."""
-        groups: dict = {}
-        order: list = []
-        for l in items:
-            k = dupe_key(l)
-            if k not in groups:
-                groups[k] = [l]
-                order.append(k)
-            else:
-                groups[k].append(l)
-        return [groups[k] for k in order]
-
-    def line(group: list) -> str:
-        l = group[0]
-        price = f"£{l.price_pcm:,}/mo" if l.price_pcm else "£?"
-        size = f"{l.size_sqft} sqft" if l.size_sqft else "size n/a"
-        furn = l.furnishing.replace("-", " ") if l.furnishing not in ("", "unknown") else "furnishing n/a"
-        badge = " 🆕" if any(x.url.strip() in new_urls for x in group) else ""
-        links = " · ".join(f"[{x.platform}]({x.url})" for x in group)
-        return (f"- **{price}** · {l.bed_label or '?'} · {size} · {OUTDOOR_LABELS.get(l.outdoor)} · {furn}\n"
-                f"  {l.area} — {links}{badge}")
-
-    ranked = sorted(res["kept"], key=lambda l: {"High": 0, "Medium": 1, "Low": 2}[l.priority])
-    highs = collapse([l for l in ranked if l.priority == "High"])
-    meds = collapse([l for l in ranked if l.priority == "Medium"])
-
-    out = [
-        "# 🏠 London flat hunt",
-        "",
-        f"**{t['added']} new** today · {t['duplicates']} already tracked · "
-        f"scanned {res['raw']} listings, {res['candidates']} in scope.",
-        "",
-        f"🟢 **{p['High']} HIGH**  ·  🟡 {p['Medium']} MEDIUM  ·  ⚪ {p['Low']} LOW  ·  🆕 = new today",
+    cutoff = datetime.now() - timedelta(hours=recent_hours)
+    new_rows = [r for r in rows if str(r.get("URL", "")).strip() in new_urls]
+    recent_rows = [
+        r for r in rows
+        if str(r.get("URL", "")).strip() not in new_urls
+        and (_parse_found(r.get("Found On")) or datetime.min) >= cutoff
     ]
-    if highs:
-        out += ["", "## 🟢 HIGH priority"] + [line(l) for l in highs]
-    if meds:
-        out += ["", f"## 🟡 MEDIUM (top {min(6, len(meds))} of {len(meds)})"] + [line(l) for l in meds[:6]]
-    if not highs and not meds:
-        out += ["", "_No HIGH or MEDIUM matches in scope today._"]
+
+    out = ["# 🏠 London flat hunt", ""]
+    if not new_rows and not recent_rows:
+        out += [f"_No new or recent flats (tracker holds {total})._",
+                "", f"📥 **[Download the full tracker (Excel)]({TRACKER_DOWNLOAD})**"]
+        print("\n".join(out))
+        return
+
+    n_hi = len(_by_priority(new_rows, "High"))
+    n_md = len(_by_priority(new_rows, "Medium"))
+    n_lo = len(_by_priority(new_rows, "Low"))
+    out.append(
+        f"**{len(new_rows)} new this run** (🟢 {n_hi} · 🟡 {n_md} · ⚪ {n_lo}) · "
+        f"{len(recent_rows)} recent (last {recent_hours}h) · tracker holds {total}."
+    )
+
+    if new_rows:
+        out += ["", "## 🆕 New this run"]
+        for pr, label in (("High", "🟢 HIGH"), ("Medium", "🟡 MEDIUM"), ("Low", "⚪ LOW")):
+            group = _by_priority(new_rows, pr)
+            if group:
+                out += [f"### {label} ({len(group)})"] + [_row_line(r) for r in group]
+    else:
+        out += ["", "_Nothing new this run._"]
+
+    if recent_rows:
+        rec_hi = _by_priority(recent_rows, "High")
+        rec_md = _by_priority(recent_rows, "Medium")
+        rec_lo = _by_priority(recent_rows, "Low")
+        out += ["", f"## 🕒 Still open — found in the last {recent_hours}h"]
+        for label, group in (("🟢 HIGH", rec_hi), ("🟡 MEDIUM", rec_md)):
+            if group:
+                out += [f"### {label} ({len(group)})"] + [_row_line(r) for r in group]
+        if rec_lo:
+            out += [f"_+ {len(rec_lo)} recent LOW-priority — see the tracker._"]
+
     if res["errors"]:
         out += ["", "### ⚠️ Notes"] + [f"- {e}" for e in res["errors"]]
     out += ["", f"📥 **[Download the full tracker (Excel)]({TRACKER_DOWNLOAD})**"]
@@ -260,7 +289,7 @@ def main() -> int:
     platforms = {p.strip() for p in args.platforms.split(",") if p.strip()}
 
     res = run(cfg, tracker_path, outreach_dir, platforms, args.debug_dir, args.limit)
-    print_summary(res, tracker_path)
+    print_summary(res, tracker_path, get_int(cfg, "RECENT_HOURS", 24) or 24)
     return 0
 
 
