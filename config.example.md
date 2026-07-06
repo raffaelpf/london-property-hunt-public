@@ -46,6 +46,13 @@ FURNISH_FILTER=unfurnished, part-furnished, flexible
 MIN_SQFT=650
 ```
 
+## Summary window
+
+```
+# How many hours a flat stays in the "recent" (catch-up) section of the run summary
+RECENT_HOURS=24
+```
+
 ## Move-in
 
 ```

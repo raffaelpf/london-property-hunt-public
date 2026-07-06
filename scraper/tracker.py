@@ -6,7 +6,7 @@ size). Coloured priority rows, frozen header, auto-filter, clickable URLs.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import datetime
 from pathlib import Path
 
 import openpyxl
@@ -81,6 +81,15 @@ def _values(listing: Listing, today: str) -> dict:
 _PRANK = {"High": 0, "Medium": 1, "Low": 2}
 
 
+def _dupe_key(d: dict):
+    """Cross-listing identity: price + bedrooms + postcode. None when postcode is
+    missing (too weak to dedup on), so those fall back to URL-only dedup."""
+    pc = str(d.get("Postcode") or "").strip().lower()
+    if not pc:
+        return None
+    return (d.get("Price (pcm)"), str(d.get("Bedrooms") or "").strip().lower(), pc)
+
+
 def _read_rows(ws) -> list[dict]:
     """Read existing data rows as dicts, preserving any manual edits (Status, etc.)."""
     rows: list[dict] = []
@@ -113,29 +122,35 @@ def _write_rows(ws, rows: list[dict]) -> None:
 
 
 def update_tracker(path: str | Path, listings: list[Listing]) -> dict:
-    """Add non-duplicate listings, then sort the sheet by Found On (newest first)
-    and priority (High→Low) so today's HIGH listings sit at the top."""
+    """Add genuinely-new listings, then sort the sheet by Found On (newest first)
+    and priority (High→Low). Dedup is by URL and by (price, beds, postcode) so the
+    same flat re-listed or cross-posted to another portal isn't counted as new."""
     wb = load_or_create(path)
     ws = wb[FLATS_SHEET]
-    today = date.today().isoformat()
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     existing = _read_rows(ws)
-    seen = {str(d.get("URL", "")).strip() for d in existing}
+    seen_urls = {str(d.get("URL", "")).strip() for d in existing}
+    seen_keys = {k for k in (_dupe_key(d) for d in existing) if k}
     new_urls: set[str] = set()
     dupes = 0
     new_rows: list[dict] = []
     for listing in listings:
-        url = listing.url.strip()
-        if not url or url in seen:
+        row = _values(listing, stamp)
+        url = str(row["URL"]).strip()
+        key = _dupe_key(row)
+        if not url or url in seen_urls or (key and key in seen_keys):
             dupes += 1
             continue
-        new_rows.append(_values(listing, today))
-        seen.add(url)
+        new_rows.append(row)
+        seen_urls.add(url)
+        if key:
+            seen_keys.add(key)
         new_urls.add(url)
 
     all_rows = existing + new_rows
     # Found On descending, then priority (High first). reverse=True on the tuple
-    # gives newest date first and, within a date, High (−0) before Low (−2).
+    # gives newest first and, within a timestamp, High (−0) before Low (−2).
     all_rows.sort(
         key=lambda d: (str(d.get("Found On") or ""), -_PRANK.get(d.get("Priority"), 3)),
         reverse=True,
@@ -144,4 +159,9 @@ def update_tracker(path: str | Path, listings: list[Listing]) -> dict:
 
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
-    return {"added": len(new_urls), "duplicates": dupes, "new_urls": new_urls}
+    return {
+        "added": len(new_urls),
+        "duplicates": dupes,
+        "new_urls": new_urls,
+        "rows": all_rows,
+    }
