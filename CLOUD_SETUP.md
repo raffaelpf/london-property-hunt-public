@@ -48,9 +48,10 @@ Rightmove exposes those in search results (`keyFeatures`, keyword-match flags,
   entirely (never tracked, never notified).
 - **HIGH:** private balcony/terrace + furnishing unfurnished/part-furnished/flexible +
   ≥ 650 sq ft confirmed.
-- **MEDIUM:** everything else that passed the gate — communal/shared outdoor space,
-  size unknown or under 650 sq ft, or furnishing not stated.
-- **LOW (kept + flagged):** listed **furnished** (some landlords are flexible).
+- **MEDIUM:** communal/shared outdoor space, size unknown or under 650 sq ft, furnishing
+  not stated — **or listed furnished but otherwise HIGH** (private + big).
+- **LOW (kept + flagged):** listed **furnished** and otherwise MEDIUM (small/unknown size
+  or communal). Furnished is a one-tier demotion, since some landlords are flexible.
 
 ### The tracker
 
