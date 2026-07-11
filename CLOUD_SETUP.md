@@ -43,11 +43,14 @@ Rightmove exposes those in search results (`keyFeatures`, keyword-match flags,
 
 ### Priority rules
 
-- **Drop:** price outside £3–4.5k, or bedrooms outside 1–2.
-- **HIGH:** target area + private balcony/terrace + furnish ok + (≥ 650 sq ft or size unknown).
-- **MEDIUM:** target area + private/communal outdoor space.
-- **LOW (kept + flagged):** balcony/terrace unconfirmed ("verify"), Juliet only, or
-  listed **furnished** (some landlords are flexible — kept so nothing is missed).
+- **Drop (hard gate):** price outside £3–4.5k, bedrooms outside 1–2, or **no confirmed
+  balcony/terrace/outdoor space** — Juliet-only and "not stated" listings are dropped
+  entirely (never tracked, never notified).
+- **HIGH:** private balcony/terrace + furnishing unfurnished/part-furnished/flexible +
+  ≥ 650 sq ft confirmed.
+- **MEDIUM:** everything else that passed the gate — communal/shared outdoor space,
+  size unknown or under 650 sq ft, or furnishing not stated.
+- **LOW (kept + flagged):** listed **furnished** (some landlords are flexible).
 
 ### The tracker
 
