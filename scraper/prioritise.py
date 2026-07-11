@@ -4,12 +4,12 @@ Rules (Revision 5 — balcony/terrace as a hard gate):
 - Hard filters (return None → drop): out of price range, bedrooms outside range,
   or NO confirmed outdoor space (juliet-only / not stated are dropped entirely —
   never tracked, never notified).
-- Priority = furnishing first, then size (all survivors have outdoor space):
-  - LOW    — listed *furnished* (kept: some landlords are flexible).
+- Priority (all survivors have outdoor space):
   - HIGH   — private balcony/terrace + furnishing in (unfurnished, part-furnished,
              flexible) + size >= MIN_SQFT confirmed.
-  - MEDIUM — everything else that passed the gate (communal/shared outdoor,
-             size unknown or small, furnishing unknown).
+  - MEDIUM — communal/shared outdoor, size unknown or small, or furnishing unknown.
+  - Listed *furnished* = one-tier demotion (kept: some landlords are flexible):
+    would-be HIGH -> MEDIUM; would-be MEDIUM -> LOW.
 """
 
 from __future__ import annotations
@@ -55,12 +55,9 @@ def prioritise(listing: Listing, cfg: dict) -> str | None:
     if listing.outdoor not in ("private", "communal"):
         return None
 
-    # Priority: furnishing first, then size ------------------------------
-    if listing.furnishing == "furnished":
-        _note(listing, "listed furnished — check if flexible")
-        return "Low"
-
-    furn_ok = listing.furnishing in _FURNISH_OK
+    # Priority ------------------------------------------------------------
+    furnished = listing.furnishing == "furnished"
+    furn_ok = furnished or listing.furnishing in _FURNISH_OK
     big_enough = (
         listing.size_sqft is not None
         and (min_sqft is None or listing.size_sqft >= min_sqft)
@@ -75,9 +72,14 @@ def prioritise(listing: Listing, cfg: dict) -> str | None:
     if not furn_ok:
         _note(listing, "furnishing not stated")
 
-    if listing.outdoor == "private" and furn_ok and big_enough:
-        return "High"
-    return "Medium"
+    base = "High" if (listing.outdoor == "private" and furn_ok and big_enough) else "Medium"
+
+    # Listed furnished = one-tier demotion, never an automatic bottom:
+    # would-be High -> Medium; would-be Medium -> Low.
+    if furnished:
+        _note(listing, "listed furnished — check if flexible")
+        return "Medium" if base == "High" else "Low"
+    return base
 
 
 def _note(listing: Listing, note: str) -> None:
