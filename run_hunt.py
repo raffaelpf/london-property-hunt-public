@@ -19,6 +19,7 @@ import traceback
 from pathlib import Path
 from urllib.parse import quote
 
+from scraper import classify
 from scraper.config import get_int, load_config
 from scraper.models import Listing
 from scraper.outreach import write_outreach_files
@@ -183,8 +184,10 @@ def run(cfg, tracker_path, outreach_dir, platforms, debug_dir, limit) -> dict:
 
     # Record every examined flat (kept AND dropped) in the Seen ledger so a flat
     # is classified once and skipped on later runs — even the no-outdoor ones
-    # that never make it into the visible tracker.
-    counts = update_tracker(tracker_path, kept, classified=examined)
+    # that never make it into the visible tracker. Only when Claude actually ran,
+    # so adding a key later doesn't find every flat already cached as "done".
+    counts = update_tracker(tracker_path, kept,
+                            classified=examined if classify.llm_active() else None)
     outreach_files = write_outreach_files(kept, cfg, outreach_dir)
     priorities = {"High": 0, "Medium": 0, "Low": 0}
     for l in kept:

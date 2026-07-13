@@ -54,15 +54,16 @@ During detail-page enrichment, `scraper/classify.py` asks **Claude** to read the
 listing text and return `private` / `communal` / `juliet` / `none`. An LLM knows
 "Covent Garden" is a location, not a garden, so these place-name traps go away.
 
-- **Only new flats are classified.** Every flat examined in a run is recorded in
-  a hidden `Seen` sheet in the tracker workbook (by URL and by
-  price/beds/postcode) — including flats *dropped* for having no outdoor space,
-  which never reach the visible `Flats` sheet. Before enrichment the run skips
-  any flat already in that ledger, so a listing is fetched and sent to Claude
-  **once**, not re-classified every day it re-appears in search results. An
-  existing flat's outdoor space doesn't change, so this is safe. (The ledger
-  lives in the same committed `.xlsx`; delete the `Seen` sheet to force
-  re-classification.)
+- **Only new flats are classified.** When Claude is active, every flat it judges
+  in a run is recorded in a hidden `Seen` sheet in the tracker workbook (by URL
+  and by price/beds/postcode) — including flats *dropped* for having no outdoor
+  space, which never reach the visible `Flats` sheet. Before enrichment the run
+  skips any flat already in that ledger, so a listing is fetched and sent to
+  Claude **once**, not re-classified every day it re-appears in search results.
+  An existing flat's outdoor space doesn't change, so this is safe. The ledger is
+  only populated when a key is present (so adding a key later doesn't find every
+  flat already cached as done); it lives in the same committed `.xlsx`, so delete
+  the `Seen` sheet to force re-classification.
 - **Enabled automatically** when `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`)
   is set in the environment. The call runs only on enriched (new) candidates
   (≤ `MAX_ENRICH` per run), not on every search result.

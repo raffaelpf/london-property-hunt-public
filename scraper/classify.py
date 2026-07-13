@@ -124,6 +124,16 @@ def _model() -> str:
     return os.environ.get("HUNT_LLM_MODEL") or DEFAULT_MODEL
 
 
+def llm_active() -> bool:
+    """True if Claude classification is actually available this run.
+
+    Used to decide whether to persist a flat as 'classified' — we only want the
+    Seen ledger to hold flats Claude judged, so that adding an API key later
+    doesn't leave regex-verdict flats permanently cached as done.
+    """
+    return _get_client() is not None
+
+
 def classify_outdoor(text: str) -> str | None:
     """Return an outdoor category via Claude, or ``None`` if unavailable.
 
