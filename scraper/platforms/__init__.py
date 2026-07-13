@@ -7,10 +7,11 @@ outdoor space / furnishing / size. A platform that errors or gets blocked
 raises; the orchestrator isolates it so one bad platform never kills the run.
 """
 
-from . import openrent, onthemarket, rightmove  # noqa: F401
+from . import openrent, onthemarket, rightmove, zoopla  # noqa: F401
 
 REGISTRY = {
     "Rightmove": rightmove,
     "OnTheMarket": onthemarket,
     "OpenRent": openrent,
+    "Zoopla": zoopla,
 }

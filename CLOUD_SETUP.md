@@ -24,16 +24,21 @@ environment's agent proxy (no browser required).
 |---|---|
 | `scraper/config.py` | Parse `config.md` (`KEY=value` blocks) |
 | `scraper/fetch.py` | HTTP fetch through the agent proxy (`HTTPS_PROXY` + CA bundle) |
-| `scraper/platforms/` | Rightmove (`__NEXT_DATA__`), OnTheMarket (`__NEXT_DATA__` + detail enrich), OpenRent (DOM + detail enrich) |
+| `scraper/fetch_browser.py` | Headed-Chromium fetch (Playwright + Xvfb) that clears Zoopla's Cloudflare challenge |
+| `scraper/platforms/` | Rightmove (`__NEXT_DATA__`), OnTheMarket (`__NEXT_DATA__` + detail enrich), OpenRent (DOM + detail enrich), Zoopla (JSON-LD + detail enrich, via browser) |
 | `scraper/features.py` | Classify outdoor space (private / communal / juliet / none), furnishing, size from listing text |
 | `scraper/prioritise.py` | HIGH/MEDIUM/LOW; drops out-of-budget / out-of-bed-range; balcony & furnishing flagged not dropped |
 | `scraper/tracker.py` | `openpyxl` `Flats` sheet with URL dedup + coloured rows |
 | `scraper/outreach.py` | A `<100`‑word `.txt` enquiry per HIGH listing |
 
-> **Why HTTP, not a browser?** Listing data is server-rendered / embedded in the
-> HTML, so no JS execution is needed. Playwright's headless Chromium also can't
-> open a CONNECT tunnel through this environment's proxy (the tunnel resets),
-> whereas `urllib`/`curl` work — so we fetch over HTTP.
+> **Why HTTP for most platforms?** Listing data is server-rendered / embedded
+> in the HTML, so no JS execution is needed. **Zoopla is the exception:** it
+> sits behind a Cloudflare challenge that 403s every plain HTTP client, so its
+> fetches run through a real headed Chromium (`scraper/fetch_browser.py`).
+> Historical note: the browser route used to fail entirely because this
+> environment's egress proxy resets TLS ClientHellos carrying the ECH /
+> post-quantum extensions modern Chromium sends; `fetch_browser` disables both
+> via a Chromium enterprise policy, which unblocked it.
 
 **Two-stage per platform:** a filtered search returns candidates; then for
 OnTheMarket/OpenRent the detail page is fetched and its full description run
@@ -72,7 +77,7 @@ and viewable on GitHub. Dedup is by listing URL — safe to run repeatedly.
 ## Install & run
 
 ```bash
-pip install -r requirements.txt          # openpyxl + beautifulsoup4
+pip install -r requirements.txt          # openpyxl + beautifulsoup4 + playwright (Zoopla)
 cp config.example.md config.md           # then edit your details
 python run_hunt.py                        # all sources
 python run_hunt.py --platforms Rightmove --debug-dir debug --limit 20   # narrow test
@@ -85,10 +90,17 @@ Flags: `--platforms` (subset), `--limit N` (cap per search), `--debug-dir DIR`
 
 ## Notes & caveats
 
-- **Sources:** Rightmove + OnTheMarket + OpenRent. **Zoopla is disabled**
-  (Cloudflare 403s non-interactive clients); SpareRoom removed (rooms-only).
-  OnTheMarket (per-area) is the main workhorse; Rightmove is London-wide +
-  post-filtered to target areas (lower yield); OpenRent is a bonus.
+- **Sources:** Rightmove + OnTheMarket + OpenRent + Zoopla; SpareRoom removed
+  (rooms-only). OnTheMarket and Zoopla (both per-area) are the workhorses;
+  Rightmove is London-wide + post-filtered to target areas (lower yield);
+  OpenRent is a bonus.
+- **Zoopla caveats:** fetches go through a headed Chromium that solves the
+  Cloudflare Turnstile (see `scraper/fetch_browser.py`) — slower than plain
+  HTTP, and a solve can occasionally fail (the run continues; the summary
+  shows the error). Area names must match Zoopla's own location slugs:
+  e.g. *Waterloo*, *Farringdon* and *Bloomsbury* aren't Zoopla locations and
+  error out as "area not recognised", while *Soho*, *Covent Garden* and
+  *Southwark* work.
 - **Furnishing "flexible" caveat:** Rightmove is URL-filtered to
   unfurnished/part-furnished, so a *flexible* listing tagged "furnished" there
   can be missed; OnTheMarket/OpenRent furnished listings are kept as LOW+flagged.
