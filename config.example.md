@@ -21,7 +21,7 @@ Comma-separated, in priority order. Used to build per-area search URLs and to
 match a listing's location for prioritisation.
 
 ```
-PRIMARY_AREAS=Soho, Waterloo, Farringdon, Covent Garden, Southwark, Bloomsbury, Clerkenwell, Holborn, Barbican, Fitzrovia, Euston, St Pancras, SE1
+PRIMARY_AREAS=Soho, Waterloo, Farringdon, Covent Garden, Southwark, Bloomsbury, Clerkenwell, Holborn, Barbican, Fitzrovia, Euston, St Pancras, SE1, WC1, EC1
 SECONDARY_AREAS=
 ```
 
@@ -31,7 +31,7 @@ If set, `ZOOPLA_AREAS` replaces the lists above for Zoopla searches only —
 everything else (OnTheMarket URLs, area matching) still uses the lists above.
 
 ```
-ZOOPLA_AREAS=Soho, Covent Garden, Southwark, Clerkenwell, Holborn, Barbican, Fitzrovia, Euston, St Pancras, SE1
+ZOOPLA_AREAS=Soho, Covent Garden, Southwark, Clerkenwell, Holborn, Barbican, Fitzrovia, Euston, St Pancras, SE1, WC1, EC1
 ```
 
 ## What you're looking for

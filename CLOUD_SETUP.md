@@ -12,8 +12,8 @@ environment's agent proxy (no browser required).
 > **Current search (see `config.md`):** whole **1–2 bed flats**, **£3,000–£4,500**,
 > in central London (Soho, Waterloo, Farringdon, Covent Garden, Southwark,
 > Bloomsbury, Clerkenwell, Holborn, Barbican, Fitzrovia, Euston, St Pancras,
-> SE1), with a **balcony/terrace** and **unfurnished / part-furnished /
-> flexible** furnishing, preferring **> 650 sq ft**.
+> SE1, WC1, EC1), with a **balcony/terrace** and **unfurnished /
+> part-furnished / flexible** furnishing, preferring **> 650 sq ft**.
 
 ---
 
