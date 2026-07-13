@@ -26,7 +26,7 @@ environment's agent proxy (no browser required).
 | `scraper/fetch.py` | HTTP fetch through the agent proxy (`HTTPS_PROXY` + CA bundle) |
 | `scraper/platforms/` | Rightmove (`__NEXT_DATA__`), OnTheMarket (`__NEXT_DATA__` + detail enrich), OpenRent (DOM + detail enrich) |
 | `scraper/features.py` | Shared vocabulary: tracker outdoor labels + a structured furnishing-label reader (no regex classifier) |
-| `scraper/classify.py` | Claude classifier — outdoor + furnishing from source attributes + description (size fallback); used during detail-page enrichment |
+| `scraper/classify.py` | Claude classifier (via the `claude` CLI, no API key) — outdoor + furnishing from source attributes + description; batched |
 | `scraper/prioritise.py` | HIGH/MEDIUM/LOW; drops out-of-budget / out-of-bed-range; balcony & furnishing flagged not dropped |
 | `scraper/tracker.py` | `openpyxl` `Flats` sheet with URL dedup + coloured rows |
 | `scraper/outreach.py` | A `<100`‑word `.txt` enquiry per HIGH listing |
@@ -51,34 +51,34 @@ its description as a *location*, which the regex counted as a communal garden, s
 a flat with no outdoor space survived the "must have outdoor space" gate and
 showed as MEDIUM.
 
-Now, during detail-page enrichment `scraper/classify.py` hands **Claude** the
-portal's structured attributes (feature tags like `Balcony`/`Communal garden`,
-the letting furnishing label, Rightmove's keyword-match hints) as the primary
-evidence, plus the description as backup, and gets back `outdoor`
-(`private`/`communal`/`juliet`/`none`) and `furnishing`. Claude knows "Covent
-Garden" is a location, so place-name traps are gone. Size comes from the portal's
-numeric field (`minimumAreaSqFt`/`displaySize`) when present, else from Claude.
+Enrichment collects each new flat's structured attributes + description; then
+`scraper/classify.py` hands **Claude** the attributes (feature tags like
+`Balcony`/`Communal garden`, the letting furnishing label, Rightmove's
+keyword-match hints) as the primary evidence, plus the description as backup, and
+gets back `outdoor` (`private`/`communal`/`juliet`/`none`) and `furnishing`.
+Claude knows "Covent Garden" is a location, so place-name traps are gone. Size
+comes from the portal's numeric field (`minimumAreaSqFt`/`displaySize`) when
+present, else from Claude.
 
-- **Only new flats are classified.** When Claude is active, every flat it judges
-  in a run is recorded in a hidden `Seen` sheet in the tracker workbook (by URL
-  and by price/beds/postcode) — including flats *dropped* for having no outdoor
-  space, which never reach the visible `Flats` sheet. Before enrichment the run
-  skips any flat already in that ledger, so a listing is sent to Claude **once**,
-  not re-classified every day it re-appears in search results. An existing flat's
-  outdoor space doesn't change, so this is safe. The ledger is only populated
-  when a key is present (so adding a key later doesn't find every flat already
-  cached as done); it lives in the same committed `.xlsx`, so delete the `Seen`
-  sheet to force re-classification.
-- **Enabled automatically** when `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`)
-  is set. The call runs only on enriched (new) candidates (≤ `MAX_ENRICH` per
-  run), not on every search result.
-- **No key → no outdoor verdict.** Without Claude, structured fields still fill
-  furnishing and size, but outdoor stays `none` — and since outdoor is a hard
-  gate, **nothing passes**. A key (or `ant auth login` profile) is required for
-  the hunt to return flats. `HUNT_DISABLE_LLM=1` forces the no-Claude path.
-- **Env knobs:** `HUNT_LLM_MODEL` overrides the model (default
-  `claude-opus-4-8`). The run logs once to stderr which path is active
-  (`[classify] …`).
+- **No API key needed.** Classification shells out to the **`claude` CLI**
+  (`claude -p`), which is already authenticated inside a Claude Code session /
+  routine — the same way the hunt already runs. If the `claude` binary isn't on
+  `PATH` (or `HUNT_DISABLE_LLM=1`), classification is skipped: structured fields
+  still fill furnishing and size, but outdoor stays `none`, and since outdoor is
+  a hard gate, nothing passes. The run logs which happened (`[classify] …`).
+- **Batched.** All the new flats in a run are classified in a few batched CLI
+  calls (`BATCH_SIZE` per call) rather than one call each, to amortise the CLI's
+  per-call startup.
+- **Only new flats are classified.** Every flat Claude judges is recorded in a
+  hidden `Seen` sheet in the tracker workbook (by URL and by price/beds/postcode)
+  — including flats *dropped* for having no outdoor space, which never reach the
+  visible `Flats` sheet. Before enrichment the run skips any flat already in that
+  ledger, so a listing is sent to Claude **once**, not re-classified every day it
+  re-appears in search results. An existing flat's outdoor space doesn't change,
+  so this is safe. The ledger lives in the same committed `.xlsx`; delete the
+  `Seen` sheet to force re-classification.
+- **Env knobs:** `HUNT_LLM_MODEL` overrides the model alias (default `haiku` —
+  fast and cheap for this discrete task); `HUNT_DISABLE_LLM=1` skips Claude.
 
 ### Priority rules
 

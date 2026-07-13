@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Tests for listing classification (source attributes -> Claude) + the tracker
-"only classify new flats" logic.
+"""Tests for listing classification (source attributes -> Claude, via the Claude
+Code CLI) + the tracker "only classify new flats" logic.
 
-Dependency-free — no pytest, no network, no API key. Run directly:
+Dependency-free — no pytest, no network, no `claude` CLI. Run directly:
 
     python3 tests/test_outdoor_classification.py
 
-The classifier itself is Claude; these tests stub the Anthropic client so no
-network or key is needed, and cover: the structured furnishing-label reader,
-Claude parsing/caching/rejection, how a verdict is applied over structured
-fallbacks, and the new/dropped-flat skip logic.
+The classifier shells out to `claude -p`; these tests stub `classify._complete`
+(the CLI call) so no CLI/network is needed, and cover JSON extraction, single +
+batch classification, the no-backend path, and the new/dropped-flat skip logic.
 """
 
 from __future__ import annotations
@@ -36,45 +35,11 @@ def check(cond, msg):
         raise AssertionError(msg)
 
 
-def _reset_classify():
-    classify._client_singleton = "unset"
-    classify._logged_state = True  # silence the one-time log
-    classify._cache.clear()
-    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
-        os.environ.pop(var, None)
-
-
-class _Block:
-    type = "text"
-
-    def __init__(self, text):
-        self.text = text
-
-
-class _Resp:
-    def __init__(self, payload, stop_reason="end_turn"):
-        self.stop_reason = stop_reason
-        self.content = [_Block(json.dumps(payload))]
-
-
-def _stub(payload=None, resp=None):
-    """Install a stub Anthropic client returning `resp` (or one built from
-    `payload`); returns a dict tracking the number of API calls."""
-    calls = {"n": 0}
-    the_resp = resp if resp is not None else _Resp(payload)
-
-    class _Messages:
-        def create(self, **kw):
-            calls["n"] += 1
-            _stub.last_kwargs = kw
-            return the_resp
-
-    class _Client:
-        messages = _Messages()
-
-    _reset_classify()
-    classify._client_singleton = _Client()
-    return calls
+def _stub_complete(fn):
+    """Force the backend on and replace the CLI call with `fn(system, user)`."""
+    classify._available = True
+    classify._logged = True
+    classify._complete = fn
 
 
 def test_furnishing_from_label():
@@ -86,57 +51,70 @@ def test_furnishing_from_label():
     check(furnishing_from_label("Deposit: £3875") == "unknown", "unrelated -> unknown")
 
 
-def test_classify_parses_and_caches():
-    calls = _stub({"outdoor": "none", "furnishing": "unfurnished", "size_sqft": 958})
+def test_extract_json():
+    check(classify._extract_json('{"a":1}') == {"a": 1}, "bare object")
+    check(classify._extract_json('```json\n{"a":1}\n```') == {"a": 1}, "fenced object")
+    check(classify._extract_json('Here you go: [{"i":1}] done') == [{"i": 1}], "array amid prose")
+    check(classify._extract_json("nope") is None, "no json -> None")
+
+
+def test_classify_listing_single():
+    _stub_complete(lambda s, u: '{"outdoor":"none","furnishing":"unfurnished","size_sqft":958}')
     out = classify.classify_listing(["1 bedroom"], "Moments from Covent Garden. UNFURNISHED.")
     check(out == {"outdoor": "none", "furnishing": "unfurnished", "size_sqft": 958}, "parsed verdict")
-    # Source attributes are presented before the description in the prompt.
-    content = _stub.last_kwargs["messages"][0]["content"]
-    check(content.index("attributes") < content.index("Description"), "attributes come before description")
-    classify.classify_listing(["1 bedroom"], "Moments from Covent Garden. UNFURNISHED.")
-    check(calls["n"] == 1, "identical input is cached (one API call)")
+    # source attributes come before the description in the prompt
+    seen = {}
+    _stub_complete(lambda s, u: seen.setdefault("u", u) and None or '{"outdoor":"none","furnishing":"unknown","size_sqft":null}')
+    classify.classify_listing(["Balcony"], "desc text")
+    check(seen["u"].index("Attributes") < seen["u"].index("Description"), "attributes before description")
 
 
-def test_classify_size_normalised():
-    _stub({"outdoor": "private", "furnishing": "furnished", "size_sqft": 40})  # implausible
-    out = classify.classify_listing([], "tiny")
-    check(out["size_sqft"] is None, "implausible size -> None")
-    _stub({"outdoor": "private", "furnishing": "furnished", "size_sqft": None})
-    check(classify.classify_listing([], "x")["size_sqft"] is None, "null size ok")
-
-
-def test_classify_rejects_bad_and_refusal():
-    _stub({"outdoor": "patio", "furnishing": "furnished", "size_sqft": None})  # bad outdoor
+def test_classify_rejects_bad():
+    _stub_complete(lambda s, u: '{"outdoor":"patio","furnishing":"furnished","size_sqft":null}')
     check(classify.classify_listing([], "x") is None, "invalid outdoor -> None")
-    _stub({"outdoor": "none", "furnishing": "sofa", "size_sqft": None})  # bad furnishing
+    _stub_complete(lambda s, u: '{"outdoor":"none","furnishing":"sofa","size_sqft":null}')
     check(classify.classify_listing([], "y") is None, "invalid furnishing -> None")
-    _stub(resp=_Resp({"outdoor": "none", "furnishing": "furnished", "size_sqft": None}, stop_reason="refusal"))
-    check(classify.classify_listing([], "z") is None, "refusal -> None")
+    _stub_complete(lambda s, u: '{"outdoor":"private","furnishing":"furnished","size_sqft":40}')
+    check(classify.classify_listing([], "z")["size_sqft"] is None, "implausible size -> None")
 
 
-def test_apply_uses_verdict_over_structured():
-    _stub({"outdoor": "private", "furnishing": "flexible", "size_sqft": 800})
-    l = Listing(title="t", platform="OnTheMarket", url="u", attributes=["Balcony"])
-    classify.apply_classification(l, "desc", struct_size=None, struct_furnishing="unfurnished")
-    check(l.outdoor == "private", "outdoor from Claude")
-    check(l.furnishing == "flexible", "furnishing from Claude (not the structured label)")
-    check(l.size_sqft == 800, "size from Claude when no structured size")
+def test_classify_batch_applies_and_preserves_structured():
+    payload = [
+        {"i": 1, "outdoor": "private", "furnishing": "flexible", "size_sqft": 800},
+        {"i": 2, "outdoor": "none", "furnishing": "unknown", "size_sqft": 500},
+    ]
+    _stub_complete(lambda s, u: json.dumps(payload))
+    a = Listing(title="A", platform="OnTheMarket", url="u1", attributes=["Balcony"])
+    b = Listing(title="B", platform="OnTheMarket", url="u2", description="no outdoor",
+                size_sqft=650)  # structured size already set
+    n = classify.classify_batch([a, b])
+    check(n == 2, "both classified")
+    check(a.outdoor == "private" and a.furnishing == "flexible", "verdict applied to A")
+    check(a.size_sqft == 800, "size filled from Claude when empty")
+    check(b.outdoor == "none", "verdict applied to B")
+    check(b.size_sqft == 650, "structured size NOT overwritten by Claude")
 
-    _stub({"outdoor": "private", "furnishing": "flexible", "size_sqft": 800})
-    l2 = Listing(title="t", platform="OnTheMarket", url="u2")
-    classify.apply_classification(l2, "desc", struct_size=650, struct_furnishing="unfurnished")
-    check(l2.size_sqft == 650, "structured size wins over Claude's")
+
+def test_classify_batch_missing_verdict_keeps_defaults():
+    _stub_complete(lambda s, u: '[{"i":1,"outdoor":"private","furnishing":"furnished","size_sqft":null}]')
+    a = Listing(title="A", platform="OnTheMarket", url="u1", attributes=["Balcony"])
+    b = Listing(title="B", platform="OnTheMarket", url="u2", attributes=["x"], furnishing="unfurnished")
+    classify.classify_batch([a, b])  # only 1 verdict returned for 2 listings
+    check(a.outdoor == "private", "A classified")
+    check(b.outdoor == "none" and b.furnishing == "unfurnished", "B keeps its defaults when not returned")
 
 
-def test_apply_fallback_without_llm():
-    _reset_classify()
-    classify._client_singleton = None  # no LLM
-    l = Listing(title="t", platform="OpenRent", url="u", attributes=["Balcony"])
-    classify.apply_classification(l, "some description", struct_size=700, struct_furnishing="unfurnished")
-    check(l.outdoor == "none", "no LLM -> outdoor stays default 'none' (no regex fallback)")
-    check(l.furnishing == "unfurnished", "no LLM -> furnishing from structured label")
-    check(l.size_sqft == 700, "no LLM -> size from structured field")
-    check(classify.llm_active() is False, "llm_active False without a client")
+def test_no_backend_leaves_listing_untouched():
+    # No backend -> llm_active() is False -> classify_batch short-circuits before
+    # ever calling _complete, so no need to restore the stub from earlier tests.
+    classify._available = False
+    classify._logged = True
+    l = Listing(title="A", platform="OpenRent", url="u", attributes=["Balcony"], furnishing="unfurnished")
+    n = classify.classify_batch([l])
+    check(n == 0, "nothing classified without a backend")
+    check(l.outdoor == "none", "outdoor stays default 'none' (no regex fallback)")
+    check(l.furnishing == "unfurnished", "structured furnishing baseline preserved")
+    check(classify.llm_active() is False, "llm_active False without the CLI")
 
 
 def test_only_new_flats_are_reclassified():

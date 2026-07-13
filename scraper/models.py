@@ -35,6 +35,7 @@ class Listing:
     # Structured attributes from the source portal (feature tags, letting labels,
     # keyword-match hints) — the primary evidence handed to scraper.classify.
     attributes: list = field(default_factory=list)
+    description: str = ""             # detail-page free text (classifier backup)
 
     priority: str = ""                # set by prioritise.py: High / Medium / Low
 

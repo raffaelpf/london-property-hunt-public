@@ -7,7 +7,6 @@ exact sqft live on the detail page, fetched by :func:`enrich`.
 
 from __future__ import annotations
 
-from ..classify import apply_classification
 from ..features import furnishing_from_label
 from ..fetch import dump_html, fetch_html
 from ..models import Listing
@@ -110,14 +109,17 @@ def enrich(listing: Listing, debug_dir=None) -> None:
             str(f.get("feature", "")) if isinstance(f, dict) else str(f)
             for f in (node.get("features") or [])
         ]
-        # Source attributes first: letting labels + feature tags feed the classifier.
+        # Source attributes first: letting labels + feature tags are the primary
+        # evidence for the classifier (run in one batch by run_hunt); the
+        # description is the backup, and size/furnishing come from structured fields.
         listing.attributes = items + tags
-        description = base.clean(" ".join([str(node.get("description") or ""), str(node.get("summary") or "")]))
-        apply_classification(listing, description,
-                             struct_size=_node_size_sqft(node),
-                             struct_furnishing=_furnishing_of(items))
+        listing.description = base.clean(" ".join([str(node.get("description") or ""), str(node.get("summary") or "")]))
+        size = _node_size_sqft(node)
+        if size:
+            listing.size_sqft = size
+        listing.furnishing = _furnishing_of(items)
     else:  # fallback: visible body text, no structured attributes
-        apply_classification(listing, base.clean(base.soup(html).get_text(" ")))
+        listing.description = base.clean(base.soup(html).get_text(" "))
 
 
 def _furnishing_of(items: list[str]) -> str:

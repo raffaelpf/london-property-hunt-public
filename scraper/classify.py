@@ -2,36 +2,39 @@
 
 Order of evidence is **source attributes first, then the description**: each
 platform's structured attributes (feature tags like "Balcony"/"Communal garden",
-the letting-details furnishing label, keyword-match flags) are handed to Claude
-as the primary signal, with the free-text description as backup. There is no
-regex classifier — place names like "Covent Garden" used to fool a regex garden
-matcher; Claude reads the structured attributes and prose and isn't fooled.
+the letting furnishing label, keyword-match hints) are handed to Claude as the
+primary signal, with the free-text description as backup. There is no regex
+classifier — place names like "Covent Garden" used to fool a regex garden matcher.
 
-Graceful degradation: if the ``anthropic`` SDK isn't installed, no API key is
-set, or the call fails, :func:`classify_listing` returns ``None`` and the caller
-keeps whatever the structured source fields already gave it.
+Backend: the **Claude Code CLI** (`claude -p`), which is already authenticated
+inside a Claude Code routine — so no ANTHROPIC_API_KEY is needed. Classification
+is **batched** (many listings per model call) to amortise the CLI's per-call
+startup, and skipped entirely when the CLI isn't available (the caller keeps
+whatever the structured source fields gave it).
 """
 
 from __future__ import annotations
 
 import json
+import re
 import os
+import shutil
+import subprocess
 import sys
-from pathlib import Path
 
 OUTDOOR_CATEGORIES = ("private", "communal", "juliet", "none")
 FURNISHING_CATEGORIES = ("unfurnished", "part-furnished", "flexible", "furnished", "unknown")
-DEFAULT_MODEL = "claude-opus-4-8"
+BATCH_SIZE = 12
+CLI_TIMEOUT = 240
+_DEFAULT_MODEL = "haiku"   # classification is simple; haiku is fast + cheap. Override with HUNT_LLM_MODEL.
 
-_CA_BUNDLE = os.environ.get("REQUESTS_CA_BUNDLE") or "/root/.ccr/ca-bundle.crt"
+_RULES = """You classify a UK rental flat's OUTDOOR SPACE and FURNISHING from \
+its listing. You are given the portal's structured attributes (the strongest \
+evidence) and the free-text description.
 
-_SYSTEM = """You classify a single rental flat's OUTDOOR SPACE and FURNISHING \
-from its listing. You are given the portal's structured attributes first (treat \
-these as the strongest evidence) and then the free-text description.
-
-OUTDOOR — pick the category for the outdoor space the property itself has:
+OUTDOOR — the outdoor space the property itself has:
 - "private": its own balcony, terrace, roof terrace, patio, decking, veranda,
-  loggia, or a private garden. A balcony/terrace is private unless the text says
+  loggia, or private garden. A balcony/terrace is private unless the text says
   it is shared or communal.
 - "communal": the only outdoor space is shared/communal — a communal or
   residents' garden, a shared roof terrace/courtyard — or a garden mentioned
@@ -44,171 +47,101 @@ Garden", "Kensington Gardens", a "…Gardens" street or a "Covent Garden" tube
 station are LOCATIONS, not outdoor space. Nearby public parks/gardens are not
 the flat's own space. Only count outdoor space the property actually has.
 
-FURNISHING — pick the letting furnishing:
-- "unfurnished", "part-furnished", "furnished" per the listing.
-- "flexible": the listing says it can be let furnished OR unfurnished
-  (e.g. "furnished or unfurnished", "furnishing negotiable").
-- "unknown": furnishing is not stated.
+FURNISHING — "unfurnished", "part-furnished", "furnished" per the listing;
+"flexible" if it can be let furnished OR unfurnished; "unknown" if not stated.
 
 SIZE — internal floor area in square feet as an integer if stated (convert
-"X sq m" as X*10.76, round to nearest); null if not stated or implausible
-(outside ~100–6000 sq ft).
+"X sq m" as round(X*10.76)); null if not stated or outside ~100–6000 sq ft."""
 
-Return only the JSON object required by the schema."""
+_SYSTEM_SINGLE = _RULES + '\n\nReturn ONLY a JSON object: ' \
+    '{"outdoor": ..., "furnishing": ..., "size_sqft": <int or null>}. No prose, no code fences.'
+_SYSTEM_BATCH = _RULES + '\n\nYou will be given several listings. Return ONLY a JSON array ' \
+    'with one object per listing, in the same order, each: ' \
+    '{"i": <listing number>, "outdoor": ..., "furnishing": ..., "size_sqft": <int or null>}. ' \
+    'No prose, no code fences.'
 
-_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "outdoor": {"type": "string", "enum": list(OUTDOOR_CATEGORIES)},
-        "furnishing": {"type": "string", "enum": list(FURNISHING_CATEGORIES)},
-        "size_sqft": {"type": ["integer", "null"]},
-    },
-    "required": ["outdoor", "furnishing", "size_sqft"],
-    "additionalProperties": False,
-}
-
-# Cache verdicts within a run so re-analysing the same input costs one call.
-_cache: dict[str, dict] = {}
-_client_singleton = "unset"  # "unset" | None | anthropic.Anthropic
-_logged_state = False
+_available = "unset"   # "unset" | True | False
+_logged = False
 
 
 def _log_once(message: str) -> None:
-    global _logged_state
-    if not _logged_state:
+    global _logged
+    if not _logged:
         print(message, file=sys.stderr)
-        _logged_state = True
+        _logged = True
 
 
 def _model() -> str:
-    return os.environ.get("HUNT_LLM_MODEL") or DEFAULT_MODEL
-
-
-def _get_client():
-    """Build (once) an Anthropic client, or return None if unavailable."""
-    global _client_singleton
-    if _client_singleton != "unset":
-        return _client_singleton
-
-    if os.environ.get("HUNT_DISABLE_LLM"):
-        _log_once("  [classify] LLM disabled (HUNT_DISABLE_LLM) — structured fields only")
-        _client_singleton = None
-        return None
-    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-        _log_once("  [classify] no ANTHROPIC_API_KEY — outdoor/furnishing not assessed")
-        _client_singleton = None
-        return None
-    try:
-        import anthropic
-    except ImportError:
-        _log_once("  [classify] anthropic SDK not installed — structured fields only")
-        _client_singleton = None
-        return None
-
-    http_client = None
-    if Path(_CA_BUNDLE).exists():
-        http_client = anthropic.DefaultHttpxClient(verify=_CA_BUNDLE)
-    try:
-        _client_singleton = anthropic.Anthropic(http_client=http_client) if http_client \
-            else anthropic.Anthropic()
-    except Exception as exc:
-        _log_once(f"  [classify] client init failed ({exc}) — structured fields only")
-        _client_singleton = None
-    else:
-        _log_once(f"  [classify] Claude classification enabled ({_model()})")
-    return _client_singleton
+    return os.environ.get("HUNT_LLM_MODEL") or _DEFAULT_MODEL
 
 
 def llm_active() -> bool:
-    """True if Claude classification is actually available this run.
+    """True if the Claude Code CLI is available for classification this run."""
+    global _available
+    if _available == "unset":
+        if os.environ.get("HUNT_DISABLE_LLM"):
+            _log_once("  [classify] disabled (HUNT_DISABLE_LLM) — structured fields only")
+            _available = False
+        elif shutil.which("claude"):
+            _log_once(f"  [classify] using the Claude Code CLI ({_model()}) — no API key needed")
+            _available = True
+        else:
+            _log_once("  [classify] 'claude' CLI not found — outdoor/furnishing not assessed")
+            _available = False
+    return _available
 
-    Used to decide whether to persist a flat as 'classified' — we only want the
-    Seen ledger to hold flats Claude judged, so that adding an API key later
-    doesn't leave source-field-only flats permanently cached as done.
-    """
-    return _get_client() is not None
 
-
-def _prompt(attributes: list[str], description: str) -> str:
-    attrs = "\n".join(f"- {a}" for a in attributes if a and a.strip()) or "(none provided)"
-    desc = (description or "").strip()[:6000] or "(no description)"
-    return f"Listing attributes from the portal:\n{attrs}\n\nDescription:\n{desc}"
-
-
-def classify_listing(attributes: list[str], description: str) -> dict | None:
-    """Return ``{"outdoor", "furnishing", "size_sqft"}`` via Claude, or ``None``.
-
-    ``None`` means "no LLM verdict" — the caller keeps its structured-field
-    values. ``attributes`` are the portal's structured signals (the primary
-    evidence); ``description`` is the free-text backup.
-    """
-    client = _get_client()
-    if client is None:
+def _complete(system: str, user: str) -> str | None:
+    """Return Claude's text response for (system, user) via the CLI, or None."""
+    if not llm_active():
         return None
-
-    content = _prompt(attributes, description)
-    if not content.strip():
-        return None
-    if content in _cache:
-        return _cache[content]
-
     try:
-        resp = client.messages.create(
-            model=_model(),
-            max_tokens=256,
-            system=_SYSTEM,
-            messages=[{"role": "user", "content": content}],
-            output_config={"format": {"type": "json_schema", "schema": _SCHEMA}},
+        proc = subprocess.run(
+            ["claude", "-p", "--system-prompt", system,
+             "--model", _model(), "--output-format", "json"],
+            input=user, capture_output=True, text=True, timeout=CLI_TIMEOUT,
         )
     except Exception as exc:
-        _log_once(f"  [classify] API call failed ({exc}) — structured fields only")
-        globals()["_client_singleton"] = None  # stop retrying this run
+        _log_once(f"  [classify] Claude CLI call failed ({exc}) — structured fields only")
         return None
-
-    if getattr(resp, "stop_reason", None) == "refusal":
+    if proc.returncode != 0:
+        _log_once(f"  [classify] Claude CLI exit {proc.returncode} — structured fields only")
         return None
     try:
-        blob = next(b.text for b in resp.content if b.type == "text")
-        data = json.loads(blob)
-    except (StopIteration, ValueError, AttributeError):
+        env = json.loads(proc.stdout)
+    except ValueError:
         return None
-
-    verdict = _normalise(data)
-    if verdict is None:
+    if env.get("is_error"):
         return None
-    _cache[content] = verdict
-    return verdict
+    return env.get("result")
 
 
-def apply_classification(listing, description: str = "",
-                         struct_size: int | None = None,
-                         struct_furnishing: str = "unknown") -> None:
-    """Set ``listing.outdoor`` / ``furnishing`` / ``size_sqft`` for one listing.
-
-    Order of evidence: the listing's structured ``attributes`` + ``description``
-    go to Claude, which decides outdoor and furnishing. Structured fields are the
-    fallback when Claude is unavailable: ``struct_size`` (a numeric portal field)
-    always wins for size; ``struct_furnishing`` (a letting label) is used only
-    when Claude didn't run.
-    """
-    verdict = classify_listing(list(getattr(listing, "attributes", []) or []), description)
-    if verdict is not None:
-        listing.outdoor = verdict["outdoor"]
-        listing.furnishing = verdict["furnishing"]
-    elif struct_furnishing and struct_furnishing != "unknown":
-        listing.furnishing = struct_furnishing
-    if struct_size:
-        listing.size_sqft = struct_size
-    elif verdict is not None and verdict.get("size_sqft") and not listing.size_sqft:
-        listing.size_sqft = verdict["size_sqft"]
+def _extract_json(text: str):
+    """Parse the first JSON value in text, tolerating ``` fences and prose."""
+    if not text:
+        return None
+    t = text.strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z]*\n?", "", t)
+        t = re.sub(r"\n?```\s*$", "", t)
+    for i, ch in enumerate(t):
+        if ch in "[{":
+            try:
+                obj, _ = json.JSONDecoder().raw_decode(t[i:])
+                return obj
+            except ValueError:
+                continue
+    return None
 
 
-def _normalise(data: dict) -> dict | None:
-    outdoor = data.get("outdoor")
-    furnishing = data.get("furnishing")
+def _normalise(item) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    outdoor = item.get("outdoor")
+    furnishing = item.get("furnishing")
     if outdoor not in OUTDOOR_CATEGORIES or furnishing not in FURNISHING_CATEGORIES:
         return None
-    size = data.get("size_sqft")
+    size = item.get("size_sqft")
     try:
         size = int(size) if size is not None else None
     except (TypeError, ValueError):
@@ -216,3 +149,65 @@ def _normalise(data: dict) -> dict | None:
     if size is not None and not (100 <= size <= 6000):
         size = None
     return {"outdoor": outdoor, "furnishing": furnishing, "size_sqft": size}
+
+
+def classify_listing(attributes: list, description: str) -> dict | None:
+    """Classify a single listing → ``{"outdoor","furnishing","size_sqft"}`` or None."""
+    text = _complete(_SYSTEM_SINGLE, _single_user(attributes, description))
+    return _normalise(_extract_json(text)) if text else None
+
+
+def _single_user(attributes: list, description: str) -> str:
+    attrs = "; ".join(a for a in (attributes or []) if a and str(a).strip())[:1000] or "(none)"
+    desc = (description or "").strip()[:4000] or "(no description)"
+    return f"Attributes from the portal: {attrs}\n\nDescription: {desc}"
+
+
+def _batch_user(chunk: list) -> str:
+    blocks = []
+    for idx, l in enumerate(chunk, 1):
+        attrs = "; ".join(a for a in (getattr(l, "attributes", []) or []) if a and str(a).strip())[:800] or "(none)"
+        desc = (getattr(l, "description", "") or "").strip()[:1500] or "(no description)"
+        blocks.append(f"### Listing {idx}\nAttributes: {attrs}\nDescription: {desc}")
+    return "Classify each listing below.\n\n" + "\n\n".join(blocks)
+
+
+def _parse_batch(text: str, n: int) -> list:
+    arr = _extract_json(text)
+    out = [None] * n
+    if not isinstance(arr, list):
+        return out
+    for j, item in enumerate(arr):
+        idx = item.get("i") if isinstance(item, dict) else None
+        pos = (idx - 1) if isinstance(idx, int) and 1 <= idx <= n else j
+        if 0 <= pos < n:
+            out[pos] = _normalise(item)
+    return out
+
+
+def classify_batch(listings: list) -> int:
+    """Classify each listing in one or a few batched CLI calls; mutate
+    ``outdoor`` / ``furnishing`` in place (and fill ``size_sqft`` when empty).
+
+    Returns the number classified. Structured fields already on the listing are
+    the fallback: ``size_sqft`` from a numeric portal field is never overwritten,
+    and outdoor/furnishing keep their current values for any listing not returned.
+    """
+    todo = [l for l in listings if (getattr(l, "attributes", None) or getattr(l, "description", ""))]
+    if not todo or not llm_active():
+        return 0
+    done = 0
+    for i in range(0, len(todo), BATCH_SIZE):
+        chunk = todo[i:i + BATCH_SIZE]
+        text = _complete(_SYSTEM_BATCH, _batch_user(chunk))
+        if text is None:
+            break  # CLI failed — stop, leave the rest on their structured fields
+        for listing, verdict in zip(chunk, _parse_batch(text, len(chunk))):
+            if verdict is None:
+                continue
+            listing.outdoor = verdict["outdoor"]
+            listing.furnishing = verdict["furnishing"]
+            if not listing.size_sqft and verdict["size_sqft"]:
+                listing.size_sqft = verdict["size_sqft"]
+            done += 1
+    return done

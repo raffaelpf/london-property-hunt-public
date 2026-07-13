@@ -174,6 +174,12 @@ def run(cfg, tracker_path, outreach_dir, platforms, debug_dir, limit) -> dict:
     if len([c for c in fresh if hasattr(REGISTRY.get(c.platform), "enrich")]) > MAX_ENRICH:
         print(f"  ⚠️ enrich capped at {MAX_ENRICH}; some listings not detail-checked", file=sys.stderr)
 
+    # Classify outdoor + furnishing for the newly-enriched flats in one batched
+    # pass (source attributes -> Claude, via the Claude Code CLI).
+    classified = classify.classify_batch(examined)
+    if examined:
+        print(f"  classified {classified}/{len(examined)} new flats")
+
     kept: list[Listing] = []
     for l in fresh:
         p = prioritise(l, cfg)

@@ -1,5 +1,2 @@
 openpyxl>=3.1
 beautifulsoup4>=4.12
-# Outdoor-space classification via Claude (scraper/classify.py). Optional at
-# runtime — the pipeline falls back to regex if no ANTHROPIC_API_KEY is set.
-anthropic>=0.40

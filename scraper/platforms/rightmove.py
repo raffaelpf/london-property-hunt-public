@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import re
 
-from ..classify import apply_classification
 from ..features import furnishing_from_label
 from ..fetch import dump_html, fetch_html
 from ..models import Listing
@@ -91,14 +90,17 @@ def enrich(listing: Listing, debug_dir=None) -> None:
     kf_html = [base.clean(el.get_text(" ")) for el in s.select('[data-testid="keyFeatures"]')]
     listing.attributes = list(listing.attributes or []) + [k for k in kf_html if k]
 
-    # Structured furnishing label from the letting-details section.
+    # Structured furnishing label from the letting-details section: fed to the
+    # classifier as an attribute, and set as the baseline in case Claude is off.
     flat_text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
     m = re.search(r"Furnish type[:\s]*([A-Za-z][A-Za-z \-]{2,24})", flat_text)
     struct_furnishing = furnishing_from_label(m.group(1)) if m else "unknown"
     if struct_furnishing != "unknown":
         listing.attributes.append(f"Furnish type: {struct_furnishing}")
-
-    apply_classification(listing, description="", struct_furnishing=struct_furnishing)
+        listing.furnishing = struct_furnishing
+    # Description left empty on purpose — Rightmove's detail page carries a
+    # standing glossary that isn't specific to this flat; the key features +
+    # keyword-match hints in listing.attributes are the signal.
 
 
 def search(url: str, cfg: dict, listing_type: str = "flat", debug_dir=None, max_pages: int = 4) -> list[Listing]:

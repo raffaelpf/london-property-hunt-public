@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import re
 
-from ..classify import apply_classification
 from ..fetch import dump_html, fetch_html
 from ..models import Listing
 from . import base
@@ -78,7 +77,6 @@ def enrich(listing: Listing, debug_dir=None) -> None:
         return
     s = base.soup(html)
     desc = s.find("div", class_=re.compile("description", re.I))
-    text = base.clean(desc.get_text(" ")) if desc else base.clean(s.get_text(" "))
     # OpenRent exposes no reliable structured outdoor/furnishing/size fields, so
-    # Claude reads the description; size comes back from the text when stated.
-    apply_classification(listing, text)
+    # the classifier works from the description (run in one batch by run_hunt).
+    listing.description = base.clean(desc.get_text(" ")) if desc else base.clean(s.get_text(" "))
