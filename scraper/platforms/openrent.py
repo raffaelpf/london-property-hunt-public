@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 
+from ..classify import classify_outdoor
 from ..features import analyze_text
 from ..fetch import dump_html, fetch_html
 from ..models import Listing
@@ -80,11 +81,17 @@ def enrich(listing: Listing, debug_dir=None) -> None:
         return
     s = base.soup(html)
     desc = s.find("div", class_=re.compile("description", re.I))
-    text = base.clean(desc.get_text(" ")) if desc else base.clean(s.get_text(" "))
-    a = analyze_text(text[:8000])
-    order = {"private": 3, "communal": 2, "juliet": 1, "none": 0}
-    if order[a["outdoor"]] > order[listing.outdoor]:
-        listing.outdoor = a["outdoor"]
+    text = (base.clean(desc.get_text(" ")) if desc else base.clean(s.get_text(" ")))[:8000]
+    a = analyze_text(text)
+    # Outdoor space: prefer Claude's verdict on the full text (handles
+    # place-name traps like "Covent Garden"); else the regex precedence merge.
+    llm = classify_outdoor(text)
+    if llm is not None:
+        listing.outdoor = llm
+    else:
+        order = {"private": 3, "communal": 2, "juliet": 1, "none": 0}
+        if order[a["outdoor"]] > order[listing.outdoor]:
+            listing.outdoor = a["outdoor"]
     if listing.furnishing in ("", "unknown") and a["furnishing"] != "unknown":
         listing.furnishing = a["furnishing"]
     if not listing.size_sqft and a["sqft"]:

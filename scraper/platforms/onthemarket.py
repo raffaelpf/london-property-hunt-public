@@ -7,6 +7,7 @@ exact sqft live on the detail page, fetched by :func:`enrich`.
 
 from __future__ import annotations
 
+from ..classify import classify_outdoor
 from ..features import analyze_text
 from ..fetch import dump_html, fetch_html
 from ..models import Listing
@@ -111,20 +112,27 @@ def enrich(listing: Listing, debug_dir=None) -> None:
             for f in (node.get("features") or [])
         ]
         parts += [str(node.get("description") or ""), str(node.get("summary") or "")]
-        a = analyze_text(base.clean(" ".join(parts))[:8000])
-        _merge(listing, a)
+        text = base.clean(" ".join(parts))[:8000]
+        _merge(listing, analyze_text(text), text)
         size = _node_size_sqft(node)
         if size and not listing.size_sqft:
             listing.size_sqft = size
     else:  # fallback: visible body text
-        _merge(listing, analyze_text(base.soup(html).get_text(" ")[:8000]))
+        text = base.soup(html).get_text(" ")[:8000]
+        _merge(listing, analyze_text(text), text)
 
 
-def _merge(listing: Listing, a: dict) -> None:
-    # Prefer a definite outdoor finding from the detail page.
-    order = {"private": 3, "communal": 2, "juliet": 1, "none": 0}
-    if order[a["outdoor"]] > order[listing.outdoor]:
-        listing.outdoor = a["outdoor"]
+def _merge(listing: Listing, a: dict, text: str = "") -> None:
+    # Outdoor space: let Claude decide from the full detail text (it handles
+    # place-name traps like "Covent Garden" that regex can't); fall back to the
+    # regex verdict, preferring a more-definite finding over the search guess.
+    llm = classify_outdoor(text) if text else None
+    if llm is not None:
+        listing.outdoor = llm
+    else:
+        order = {"private": 3, "communal": 2, "juliet": 1, "none": 0}
+        if order[a["outdoor"]] > order[listing.outdoor]:
+            listing.outdoor = a["outdoor"]
     if listing.furnishing in ("", "unknown") and a["furnishing"] != "unknown":
         listing.furnishing = a["furnishing"]
     if not listing.size_sqft and a["sqft"]:

@@ -25,7 +25,8 @@ environment's agent proxy (no browser required).
 | `scraper/config.py` | Parse `config.md` (`KEY=value` blocks) |
 | `scraper/fetch.py` | HTTP fetch through the agent proxy (`HTTPS_PROXY` + CA bundle) |
 | `scraper/platforms/` | Rightmove (`__NEXT_DATA__`), OnTheMarket (`__NEXT_DATA__` + detail enrich), OpenRent (DOM + detail enrich) |
-| `scraper/features.py` | Classify outdoor space (private / communal / juliet / none), furnishing, size from listing text |
+| `scraper/features.py` | Regex classifier for outdoor space (private / communal / juliet / none), furnishing, size from listing text |
+| `scraper/classify.py` | LLM outdoor-space classifier (Claude) — used during detail-page enrichment; falls back to `features.py` when no API key |
 | `scraper/prioritise.py` | HIGH/MEDIUM/LOW; drops out-of-budget / out-of-bed-range; balcony & furnishing flagged not dropped |
 | `scraper/tracker.py` | `openpyxl` `Flats` sheet with URL dedup + coloured rows |
 | `scraper/outreach.py` | A `<100`‑word `.txt` enquiry per HIGH listing |
@@ -40,6 +41,28 @@ OnTheMarket/OpenRent the detail page is fetched and its full description run
 through `features.analyze_text` to confirm balcony/terrace, furnishing and size.
 Rightmove exposes those in search results (`keyFeatures`, keyword-match flags,
 `displaySize`), so it needs no detail fetch.
+
+### Outdoor-space classification (Claude)
+
+Deciding whether a flat has outdoor space from listing text is error-prone with
+regex: a flat in **Covent Garden** (or Hatton Garden, Kensington Gardens, …) has
+"garden" all over its description as a *place name*, which the regex read as a
+communal garden — so a flat with no outdoor space survived the "must have
+outdoor space" gate and showed as MEDIUM.
+
+During detail-page enrichment, `scraper/classify.py` asks **Claude** to read the
+listing text and return `private` / `communal` / `juliet` / `none`. An LLM knows
+"Covent Garden" is a location, not a garden, so these place-name traps go away.
+
+- **Enabled automatically** when `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`)
+  is set in the environment. The call runs only on enriched candidates
+  (≤ `MAX_ENRICH` per run), not on every search result.
+- **Graceful fallback:** with no key, the SDK missing, or an API error, it falls
+  back to the regex in `features.py` — which now also strips the common
+  "…garden(s)" place names, so the Covent Garden case is handled either way.
+- **Env knobs:** `HUNT_LLM_MODEL` overrides the model (default
+  `claude-opus-4-8`); `HUNT_DISABLE_LLM=1` forces the regex path. The run logs
+  once to stderr which path is active (`[classify] …`).
 
 ### Priority rules
 

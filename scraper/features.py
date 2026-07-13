@@ -59,12 +59,26 @@ _NEGATED_RE = re.compile(
     re.I,
 )
 
+# Place names that contain "garden(s)" but are locations, not outdoor space.
+# Claude (scraper.classify) handles the open-ended cases; this curated list is
+# only the regex fallback for when no LLM is available. It stops e.g. a flat in
+# "Covent Garden" from reading as a communal garden and surviving the outdoor
+# gate. Not exhaustive by design — the LLM is the real fix for place-name traps.
+_PLACE_GARDEN_RE = re.compile(
+    r"covent\s+garden|hatton\s+garden|(welwyn\s+)?garden\s+city"
+    r"|(kensington|spring|whitehall|winchester|st\s+james'?s?)\s+gardens?",
+    re.I,
+)
+
 
 def _outdoor(t: str) -> str:
     # Strip house-type mentions so "terraced house" can't read as a terrace,
-    # and negated phrases ("no outdoor space") so they don't read as present.
+    # negated phrases ("no outdoor space") so they don't read as present, and
+    # "garden" place names (Covent Garden, etc.) so a location can't read as a
+    # garden.
     t = _HOUSE_TYPE_RE.sub(" ", t)
     t = _NEGATED_RE.sub(" ", t)
+    t = _PLACE_GARDEN_RE.sub(" ", t)
     juliet = bool(re.search(r"juliet|juliette", t))
     # Remove juliet/french balcony phrases to see if a *real* balcony remains.
     t_nojuliet = re.sub(r"(french|juliet(te)?)\s+balcon\w*", " ", t)
