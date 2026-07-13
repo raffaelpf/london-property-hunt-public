@@ -16,6 +16,10 @@ from .features import OUTDOOR_LABELS
 from .models import Listing
 
 FLATS_SHEET = "Flats"
+# Hidden ledger of every flat we've examined (kept or dropped), so each flat is
+# classified once and never re-enriched/re-classified on later runs.
+SEEN_SHEET = "Seen"
+SEEN_COLS = ["URL", "Key", "Outdoor", "Seen On"]
 COLS = [
     "Title", "Platform", "URL", "Area", "Postcode", "Price (pcm)", "Bedrooms",
     "Furnishing", "Balcony/Terrace", "Size (sqft)", "Available From",
@@ -90,6 +94,82 @@ def _dupe_key(d: dict):
     return (d.get("Price (pcm)"), str(d.get("Bedrooms") or "").strip().lower(), pc)
 
 
+def _listing_dupe_key(listing: Listing):
+    """(price, beds, postcode) identity for a pre-tracker Listing — mirrors what
+    ``_values`` -> ``_dupe_key`` produce for a written row, so the two agree."""
+    pc = str(listing.postcode or "").strip().lower()
+    if not pc:
+        return None
+    beds = listing.bed_label or (listing.bed_count if listing.bed_count is not None else "")
+    return (listing.price_pcm, str(beds).strip().lower(), pc)
+
+
+def _key_str(key) -> str:
+    """Flatten a (price, beds, postcode) tuple to a comparable string ('' if None)."""
+    return "|".join(str(x) for x in key) if key else ""
+
+
+def _seen_ws(wb):
+    """The hidden 'Seen' ledger sheet — every flat we've examined (kept or
+    dropped), so a flat is classified once and never re-examined."""
+    if SEEN_SHEET in wb.sheetnames:
+        return wb[SEEN_SHEET]
+    ws = wb.create_sheet(SEEN_SHEET)
+    ws.sheet_state = "hidden"
+    for i, col in enumerate(SEEN_COLS, 1):
+        ws.cell(row=1, column=i, value=col)
+    return ws
+
+
+def _record_seen(wb, listings: list[Listing], stamp: str) -> None:
+    """Append newly-examined flats (URL + identity key + verdict) to the ledger."""
+    ws = _seen_ws(wb)
+    have = {str(r[0]).strip() for r in ws.iter_rows(min_row=2, values_only=True) if r and r[0]}
+    for l in listings:
+        url = str(l.url or "").strip()
+        if not url or url in have:
+            continue
+        have.add(url)
+        ws.append([url, _key_str(_listing_dupe_key(l)), l.outdoor, stamp])
+
+
+def known_identities(path: str | Path) -> tuple[set, set]:
+    """Return ``(seen_urls, seen_keys)`` for every flat already examined.
+
+    Covers both the visible ``Flats`` sheet (kept listings) and the hidden
+    ``Seen`` ledger (everything we've classified, including flats dropped for
+    having no outdoor space). Lets the caller skip re-enriching / re-classifying
+    a flat it has already looked at — an existing flat's outdoor space doesn't
+    change, so the work (and LLM cost) would be wasted. ``seen_keys`` holds
+    string-flattened (price, beds, postcode) keys.
+    """
+    p = Path(path)
+    if not p.exists():
+        return set(), set()
+    wb = load_or_create(path)
+    existing = _read_rows(wb[FLATS_SHEET])
+    seen_urls = {u for d in existing if (u := str(d.get("URL", "")).strip())}
+    seen_keys = {s for d in existing if (s := _key_str(_dupe_key(d)))}
+    if SEEN_SHEET in wb.sheetnames:
+        for r in wb[SEEN_SHEET].iter_rows(min_row=2, values_only=True):
+            if not r:
+                continue
+            if r[0] and str(r[0]).strip():
+                seen_urls.add(str(r[0]).strip())
+            if len(r) > 1 and r[1] and str(r[1]).strip():
+                seen_keys.add(str(r[1]).strip())
+    return seen_urls, seen_keys
+
+
+def is_known(listing: Listing, seen_urls: set, seen_keys: set) -> bool:
+    """True if this flat has already been examined (by URL or price/beds/postcode)."""
+    url = str(listing.url or "").strip()
+    if url and url in seen_urls:
+        return True
+    key = _key_str(_listing_dupe_key(listing))
+    return bool(key and key in seen_keys)
+
+
 def _read_rows(ws) -> list[dict]:
     """Read existing data rows as dicts, preserving any manual edits (Status, etc.)."""
     rows: list[dict] = []
@@ -121,13 +201,21 @@ def _write_rows(ws, rows: list[dict]) -> None:
     ws.auto_filter.ref = ws.dimensions
 
 
-def update_tracker(path: str | Path, listings: list[Listing]) -> dict:
+def update_tracker(path: str | Path, listings: list[Listing],
+                   classified: list[Listing] | None = None) -> dict:
     """Add genuinely-new listings, then sort the sheet by Found On (newest first)
     and priority (High→Low). Dedup is by URL and by (price, beds, postcode) so the
-    same flat re-listed or cross-posted to another portal isn't counted as new."""
+    same flat re-listed or cross-posted to another portal isn't counted as new.
+
+    ``classified`` is every flat examined this run (kept *and* dropped); each is
+    recorded in the hidden ``Seen`` ledger so it isn't re-examined next run.
+    """
     wb = load_or_create(path)
     ws = wb[FLATS_SHEET]
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    if classified:
+        _record_seen(wb, classified, stamp)
 
     existing = _read_rows(ws)
     seen_urls = {str(d.get("URL", "")).strip() for d in existing}
