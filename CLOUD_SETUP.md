@@ -11,7 +11,8 @@ environment's agent proxy (no browser required).
 >
 > **Current search (see `config.md`):** whole **1–2 bed flats**, **£3,000–£4,500**,
 > in central London (Soho, Waterloo, Farringdon, Covent Garden, Southwark,
-> Bloomsbury), with a **balcony/terrace** and **unfurnished / part-furnished /
+> Bloomsbury, Clerkenwell, Holborn, Barbican, Fitzrovia, Euston, St Pancras,
+> SE1), with a **balcony/terrace** and **unfurnished / part-furnished /
 > flexible** furnishing, preferring **> 650 sq ft**.
 
 ---
@@ -99,8 +100,10 @@ Flags: `--platforms` (subset), `--limit N` (cap per search), `--debug-dir DIR`
   HTTP, and a solve can occasionally fail (the run continues; the summary
   shows the error). Area names must match Zoopla's own location slugs:
   e.g. *Waterloo*, *Farringdon* and *Bloomsbury* aren't Zoopla locations and
-  error out as "area not recognised", while *Soho*, *Covent Garden* and
-  *Southwark* work.
+  error out as "area not recognised", while *Soho*, *Covent Garden*,
+  *Southwark*, *Clerkenwell*, *Holborn*, *Barbican*, *Fitzrovia*, *Euston*,
+  *St Pancras* and postcode districts like *SE1* work. Set `ZOOPLA_AREAS` in
+  `config.md` to give Zoopla its own list without touching the shared one.
 - **Furnishing "flexible" caveat:** Rightmove is URL-filtered to
   unfurnished/part-furnished, so a *flexible* listing tagged "furnished" there
   can be missed; OnTheMarket/OpenRent furnished listings are kept as LOW+flagged.
