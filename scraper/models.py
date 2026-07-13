@@ -32,6 +32,10 @@ class Listing:
     furnishing: str = "unknown"       # unfurnished / part-furnished / flexible / furnished / unknown
     outdoor: str = "none"             # private / communal / juliet / none
     size_sqft: Optional[int] = None
+    # Structured attributes from the source portal (feature tags, letting labels,
+    # keyword-match hints) — the primary evidence handed to scraper.classify.
+    attributes: list = field(default_factory=list)
+    description: str = ""             # detail-page free text (classifier backup)
 
     priority: str = ""                # set by prioritise.py: High / Medium / Low
 

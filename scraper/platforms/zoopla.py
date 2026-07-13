@@ -7,9 +7,12 @@ for the details.
 Search results live in a ``application/ld+json`` schema block (the
 ``lsrp-schema`` script): a ``SearchResultsPage`` whose ``itemListElement``
 carries ``Product`` items with name/price/url/address/description. The richer
-fields (``furnishedState``, EPC-derived ``sizeSqft``, ``smartTags`` like
-``attributes.balcony``) live in the detail page's escaped Next.js flight data,
-which we pull out with targeted regexes rather than parsing the whole blob.
+fields live in the detail page's escaped Next.js flight data, pulled out with
+targeted regexes rather than parsing the whole blob: ``furnishedState`` (a
+structured letting field), EPC-derived ``sizeSqft``, the feature-tag array,
+and ``smartTags`` like ``attributes.balcony``. Feature tags + smart tags are
+carried as source attributes for :mod:`scraper.classify` (Claude decides
+outdoor/furnishing); the structured fields fill furnishing and size directly.
 """
 
 from __future__ import annotations
@@ -18,7 +21,6 @@ import re
 import sys
 
 from .. import fetch_browser
-from ..features import analyze_text
 from ..fetch import dump_html
 from ..models import Listing
 from . import base
@@ -29,6 +31,7 @@ _BED_LABEL = {0: "Studio", 1: "1-Bed", 2: "2-Bed"}
 _FURNISHED_RE = re.compile(r'furnishedState\\?"\s*:\s*\\?"([a-z_]+)')
 _SQFT_RE = re.compile(r'sizeSqft\\?"\s*:\s*(\d+)')
 _FEATURES_RE = re.compile(r'features\\?"\s*:\s*\[((?:[^\[\]]){0,2000}?)\]')
+_SMART_TAG_RE = re.compile(r'attributes\.(\w+)')
 
 _FURNISHED_MAP = {
     "furnished": "furnished",
@@ -77,8 +80,9 @@ def search(url: str, cfg: dict, listing_type: str = "flat", debug_dir=None) -> l
         name = base.clean(item.get("name"))
         desc = base.clean(item.get("description"))
         price = (item.get("offers") or {}).get("price")
-        a = analyze_text(name, desc)
         beds = base.parse_beds(name)
+        # Outdoor/furnishing are decided at enrich (structured fields + Claude);
+        # the search card only carries the short description as early evidence.
         listings.append(
             Listing(
                 title=name or "Zoopla listing",
@@ -91,27 +95,27 @@ def search(url: str, cfg: dict, listing_type: str = "flat", debug_dir=None) -> l
                 price_pcm=base.parse_price_pcm(str(price)) if price else None,
                 bed_count=beds,
                 bed_label=_BED_LABEL.get(beds, f"{beds}-Bed" if beds is not None else ""),
-                furnishing=a["furnishing"],
-                outdoor=a["outdoor"],
-                size_sqft=a["sqft"],
+                description=desc,
                 notes=desc[:160],
             )
         )
     return listings
 
 
-def _flight_features(html: str) -> str:
-    """Concatenate feature-array strings from the flight data (best effort)."""
-    parts = []
+def _flight_features(html: str) -> list[str]:
+    """Feature-tag strings from the flight data (best effort)."""
+    tags: list[str] = []
     for m in _FEATURES_RE.finditer(html):
         chunk = m.group(1)
-        if '"' in chunk:  # skip non-listing hits (e.g. polyfill query strings)
-            parts.append(chunk.replace('\\"', " ").replace('"', " "))
-    return " ".join(parts)[:4000]
+        if '"' not in chunk:  # skip non-listing hits (e.g. polyfill query strings)
+            continue
+        tags += re.findall(r'"([^"\\]+)"', chunk.replace('\\"', '"'))
+    seen: set[str] = set()
+    return [t for t in tags if not (t in seen or seen.add(t))][:40]
 
 
 def enrich(listing: Listing, debug_dir=None) -> None:
-    """Refine furnishing / outdoor / size from the detail page."""
+    """Fill structured furnishing/size + source attributes from the detail page."""
     try:
         status, html = fetch_browser.get(listing.url)
     except Exception:
@@ -119,31 +123,27 @@ def enrich(listing: Listing, debug_dir=None) -> None:
     if status != 200:
         return
 
+    # Structured fields first: a dedicated letting field and the EPC-derived size.
     m = _FURNISHED_RE.search(html)
-    if m and listing.furnishing in ("", "unknown"):
-        listing.furnishing = _FURNISHED_MAP.get(m.group(1), "unknown")
-
+    furnished_label = _FURNISHED_MAP.get(m.group(1), "unknown") if m else "unknown"
+    if furnished_label != "unknown":
+        listing.furnishing = furnished_label
     if not listing.size_sqft:
         m = _SQFT_RE.search(html)
-        if m:
-            size = int(m.group(1))
-            if 100 <= size <= 6000:
-                listing.size_sqft = size
+        if m and 100 <= int(m.group(1)) <= 6000:
+            listing.size_sqft = int(m.group(1))
 
-    # Description (JSON-LD) + feature lists; smartTags are the strongest
-    # balcony/terrace signal Zoopla has.
-    desc = ""
+    # Source attributes for the classifier: feature tags + smart tags (Zoopla's
+    # own attribute detection, e.g. attributes.balcony) + the furnishing label.
+    smart = [t.replace("_", " ") for t in _SMART_TAG_RE.findall(html)]
+    attrs = _flight_features(html) + [f"smart tag: {t}" for t in dict.fromkeys(smart)]
+    if furnished_label != "unknown":
+        attrs.append(f"furnishing: {furnished_label}")
+    listing.attributes = attrs
+
     for block in base.json_ld_blocks(html):
         for node in base.walk(block):
             if isinstance(node, dict) and node.get("@type") == "RealEstateListing":
-                desc = str(node.get("description") or "")
-    a = analyze_text(desc, _flight_features(html))
-    order = {"private": 3, "communal": 2, "juliet": 1, "none": 0}
-    if order[a["outdoor"]] > order[listing.outdoor]:
-        listing.outdoor = a["outdoor"]
-    if listing.outdoor == "none" and re.search(r"attributes\.(balcony|terrace|roof_terrace)", html):
-        listing.outdoor = "private"
-    if listing.furnishing in ("", "unknown") and a["furnishing"] != "unknown":
-        listing.furnishing = a["furnishing"]
-    if not listing.size_sqft and a["sqft"]:
-        listing.size_sqft = a["sqft"]
+                desc = base.clean(str(node.get("description") or ""))
+                if len(desc) > len(listing.description):
+                    listing.description = desc

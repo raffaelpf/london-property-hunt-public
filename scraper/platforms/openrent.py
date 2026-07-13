@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import re
 
-from ..features import analyze_text
 from ..fetch import dump_html, fetch_html
 from ..models import Listing
 from . import base
@@ -49,7 +48,8 @@ def search(url: str, cfg: dict, listing_type: str = "flat", debug_dir=None) -> l
         beds = base.parse_beds(slug)
         if beds is None:
             beds = base.parse_beds(text)
-        an = analyze_text(text)
+        # Outdoor/furnishing/size are decided at enrich (Claude, from the detail
+        # description); the search card gives no reliable structured attributes.
         listings.append(
             Listing(
                 title=base.clean(a.get_text()) or slug.replace("-", " ").title(),
@@ -61,9 +61,6 @@ def search(url: str, cfg: dict, listing_type: str = "flat", debug_dir=None) -> l
                 price_pcm=base.parse_price_pcm(month.group(0)) if month else base.parse_price_pcm(text),
                 bed_count=beds,
                 bed_label=_BED_LABEL.get(beds, f"{beds}-Bed" if beds is not None else ""),
-                furnishing=an["furnishing"],
-                outdoor=an["outdoor"],
-                size_sqft=an["sqft"],
                 notes=text[:160],
             )
         )
@@ -80,12 +77,6 @@ def enrich(listing: Listing, debug_dir=None) -> None:
         return
     s = base.soup(html)
     desc = s.find("div", class_=re.compile("description", re.I))
-    text = base.clean(desc.get_text(" ")) if desc else base.clean(s.get_text(" "))
-    a = analyze_text(text[:8000])
-    order = {"private": 3, "communal": 2, "juliet": 1, "none": 0}
-    if order[a["outdoor"]] > order[listing.outdoor]:
-        listing.outdoor = a["outdoor"]
-    if listing.furnishing in ("", "unknown") and a["furnishing"] != "unknown":
-        listing.furnishing = a["furnishing"]
-    if not listing.size_sqft and a["sqft"]:
-        listing.size_sqft = a["sqft"]
+    # OpenRent exposes no reliable structured outdoor/furnishing/size fields, so
+    # the classifier works from the description (run in one batch by run_hunt).
+    listing.description = base.clean(desc.get_text(" ")) if desc else base.clean(s.get_text(" "))
