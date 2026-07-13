@@ -144,6 +144,28 @@ def test_only_new_flats_are_reclassified():
     check(not is_known(genuinely_new, seen_urls, seen_keys), "a genuinely new flat is not known")
 
 
+def test_dropped_flats_are_remembered():
+    """A flat examined but dropped (no outdoor space) is recorded in the Seen
+    ledger, so it isn't re-classified on later runs even though it never enters
+    the visible tracker."""
+    import tempfile
+
+    path = os.path.join(tempfile.mkdtemp(), "seen.xlsx")
+    kept = Listing(title="Keep", platform="OnTheMarket", url="https://y/1",
+                   postcode="WC2H", price_pcm=3800, bed_count=2, bed_label="2-Bed",
+                   outdoor="private", priority="High")
+    dropped = Listing(title="Drop", platform="OnTheMarket", url="https://y/2",
+                      postcode="EC1", price_pcm=3900, bed_count=2, bed_label="2-Bed",
+                      outdoor="none")  # no outdoor -> not in kept, but examined
+    # kept goes to the visible sheet; both were examined this run.
+    update_tracker(path, [kept], classified=[kept, dropped])
+
+    seen_urls, seen_keys = known_identities(path)
+    check(is_known(kept, seen_urls, seen_keys), "kept flat is known")
+    check(is_known(dropped, seen_urls, seen_keys),
+          "dropped no-outdoor flat is remembered via the Seen ledger")
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

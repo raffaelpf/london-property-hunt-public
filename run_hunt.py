@@ -160,12 +160,14 @@ def run(cfg, tracker_path, outreach_dir, platforms, debug_dir, limit) -> dict:
         print(f"  {len(fresh)} new to enrich/classify; {skipped_known} already tracked (skipped)")
 
     enriched = 0
+    examined: list[Listing] = []  # flats actually detail-checked + classified this run
     for l in fresh:
         module = REGISTRY.get(l.platform)
         if module and hasattr(module, "enrich") and enriched < MAX_ENRICH:
             try:
                 module.enrich(l, debug_dir)
                 enriched += 1
+                examined.append(l)
             except Exception:
                 pass
     if len([c for c in fresh if hasattr(REGISTRY.get(c.platform), "enrich")]) > MAX_ENRICH:
@@ -179,7 +181,10 @@ def run(cfg, tracker_path, outreach_dir, platforms, debug_dir, limit) -> dict:
         l.priority = p
         kept.append(l)
 
-    counts = update_tracker(tracker_path, kept)
+    # Record every examined flat (kept AND dropped) in the Seen ledger so a flat
+    # is classified once and skipped on later runs — even the no-outdoor ones
+    # that never make it into the visible tracker.
+    counts = update_tracker(tracker_path, kept, classified=examined)
     outreach_files = write_outreach_files(kept, cfg, outreach_dir)
     priorities = {"High": 0, "Medium": 0, "Low": 0}
     for l in kept:
