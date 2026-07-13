@@ -99,11 +99,11 @@ Flags: `--platforms` (subset), `--limit N` (cap per search), `--debug-dir DIR`
   Cloudflare Turnstile (see `scraper/fetch_browser.py`) — slower than plain
   HTTP, and a solve can occasionally fail (the run continues; the summary
   shows the error). Area names must match Zoopla's own location slugs:
-  e.g. *Waterloo*, *Farringdon* and *Bloomsbury* aren't Zoopla locations and
-  error out as "area not recognised", while *Soho*, *Covent Garden*,
-  *Southwark*, *Clerkenwell*, *Holborn*, *Barbican*, *Fitzrovia*, *Euston*,
-  *St Pancras* and postcode districts like *SE1* work. Set `ZOOPLA_AREAS` in
-  `config.md` to give Zoopla its own list without touching the shared one.
+  e.g. *Waterloo*, *Farringdon* and *Bloomsbury* aren't Zoopla locations —
+  those are skipped for Zoopla (console note, no error), while *Soho*,
+  *Covent Garden*, *Southwark*, *Clerkenwell*, *Holborn*, *Barbican*,
+  *Fitzrovia*, *Euston*, *St Pancras* and postcode districts like *SE1*,
+  *WC1*, *EC1* work on all platforms.
 - **Furnishing "flexible" caveat:** Rightmove is URL-filtered to
   unfurnished/part-furnished, so a *flexible* listing tagged "furnished" there
   can be missed; OnTheMarket/OpenRent furnished listings are kept as LOW+flagged.

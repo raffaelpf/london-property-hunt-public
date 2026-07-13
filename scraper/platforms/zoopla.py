@@ -15,6 +15,7 @@ which we pull out with targeted regexes rather than parsing the whole blob.
 from __future__ import annotations
 
 import re
+import sys
 
 from .. import fetch_browser
 from ..features import analyze_text
@@ -56,13 +57,15 @@ def search(url: str, cfg: dict, listing_type: str = "flat", debug_dir=None) -> l
     if status != 200:
         raise RuntimeError(f"HTTP {status} (Cloudflare challenge not cleared)")
     # An unknown area slug renders a valid page with an empty location name
-    # ("...to rent in  - Zoopla") and zero results — surface it, don't hide it.
+    # ("...to rent in  - Zoopla") and zero results. Zoopla shares the area list
+    # with platforms that DO know these names, so skip quietly rather than
+    # error on every run — but say so on the console for typo-hunting.
     m = re.search(r"<title>([^<]*)</title>", html)
     if m and re.search(r"to rent in\s*-", m.group(1)):
         slug = re.search(r"/to-rent/\w+/([^/?]+)", url)
-        raise RuntimeError(f"area '{slug.group(1) if slug else url}' not recognised "
-                           "by Zoopla — rename it or drop it (Zoopla uses its own "
-                           "location names)")
+        print(f"  [Zoopla] skipping '{slug.group(1) if slug else url}' — "
+              "not a Zoopla location name", file=sys.stderr)
+        return []
 
     listings: list[Listing] = []
     for item in _schema_items(html):

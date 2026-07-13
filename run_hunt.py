@@ -86,9 +86,8 @@ def build_jobs(cfg: dict, platforms: set[str]) -> list[dict]:
     if "Zoopla" in platforms:
         # Per-area slug searches (like OnTheMarket). No furnishing filter in the
         # URL — Zoopla's is single-choice — so prioritise.py handles demotion.
-        # ZOOPLA_AREAS overrides the shared lists: Zoopla only accepts its own
-        # location names, and an unknown one errors out on every run.
-        for area in cfg.get("ZOOPLA_AREAS") or areas:
+        # Areas Zoopla doesn't recognise are skipped inside zoopla.search().
+        for area in areas:
             jobs.append({"platform": "Zoopla", "type": "flat", "area": area,
                          "url": f"https://www.zoopla.co.uk/to-rent/flats/{_slug(area)}/"
                                 f"?price_frequency=per_month&price_min={pmin}&price_max={pmax}"

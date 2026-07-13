@@ -26,13 +26,10 @@ SECONDARY_AREAS=
 ```
 
 Zoopla only understands its own location names (e.g. *Waterloo*, *Farringdon*
-and *Bloomsbury* aren't Zoopla locations, while *Clerkenwell* or *SE1* are).
-If set, `ZOOPLA_AREAS` replaces the lists above for Zoopla searches only —
-everything else (OnTheMarket URLs, area matching) still uses the lists above.
-
-```
-ZOOPLA_AREAS=Soho, Covent Garden, Southwark, Clerkenwell, Holborn, Barbican, Fitzrovia, Euston, St Pancras, SE1, WC1, EC1
-```
+and *Bloomsbury* aren't Zoopla locations, while *Clerkenwell* or *SE1* are);
+areas it doesn't recognise are skipped for Zoopla only, with a console note.
+Postcode districts (SE1, WC1, EC1) are handy: all platforms accept them and
+they match listing postcodes directly.
 
 ## What you're looking for
 
