@@ -26,7 +26,7 @@ OUTDOOR_CATEGORIES = ("private", "communal", "juliet", "none")
 FURNISHING_CATEGORIES = ("unfurnished", "part-furnished", "flexible", "furnished", "unknown")
 BATCH_SIZE = 12
 CLI_TIMEOUT = 240
-_DEFAULT_MODEL = "haiku"   # classification is simple; haiku is fast + cheap. Override with HUNT_LLM_MODEL.
+_DEFAULT_MODEL = "sonnet"  # CLI model alias; override with HUNT_LLM_MODEL.
 
 _RULES = """You classify a UK rental flat's OUTDOOR SPACE and FURNISHING from \
 its listing. You are given the portal's structured attributes (the strongest \

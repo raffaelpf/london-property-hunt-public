@@ -77,8 +77,8 @@ present, else from Claude.
   re-appears in search results. An existing flat's outdoor space doesn't change,
   so this is safe. The ledger lives in the same committed `.xlsx`; delete the
   `Seen` sheet to force re-classification.
-- **Env knobs:** `HUNT_LLM_MODEL` overrides the model alias (default `haiku` —
-  fast and cheap for this discrete task); `HUNT_DISABLE_LLM=1` skips Claude.
+- **Env knobs:** `HUNT_LLM_MODEL` overrides the model alias (default `sonnet`);
+  `HUNT_DISABLE_LLM=1` skips Claude.
 
 ### Priority rules
 
