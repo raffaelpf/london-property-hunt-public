@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Tests for outdoor-space classification (regex fallback + LLM path).
+"""Tests for listing classification (source attributes -> Claude) + the tracker
+"only classify new flats" logic.
 
 Dependency-free — no pytest, no network, no API key. Run directly:
 
     python3 tests/test_outdoor_classification.py
 
-Covers the Covent-Garden regression (a place name must not read as a garden),
-the graceful LLM fallback when no key is set, and the LLM parsing/cache logic
-with a stubbed client.
+The classifier itself is Claude; these tests stub the Anthropic client so no
+network or key is needed, and cover: the structured furnishing-label reader,
+Claude parsing/caching/rejection, how a verdict is applied over structured
+fallbacks, and the new/dropped-flat skip logic.
 """
 
 from __future__ import annotations
@@ -19,8 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scraper import classify
-from scraper.features import _outdoor, analyze_text  # noqa: E402
+from scraper import classify  # noqa: E402
+from scraper.features import furnishing_from_label  # noqa: E402
 from scraper.models import Listing  # noqa: E402
 from scraper.tracker import is_known, known_identities, update_tracker  # noqa: E402
 
@@ -34,39 +36,12 @@ def check(cond, msg):
         raise AssertionError(msg)
 
 
-def test_place_names_are_not_gardens():
-    # The reported bug: a Covent Garden flat with no outdoor space.
-    covent = ("stunning flat in the heart of seven dials, moments from covent "
-              "garden piazza. unfurnished. transport links: covent garden, holborn.")
-    check(_outdoor(covent) == "none", "Covent Garden flat should be 'none'")
-
-    for place in ("hatton garden", "welwyn garden city", "kensington gardens",
-                  "spring gardens", "st james's gardens"):
-        text = f"modern flat near {place}, close to shops and transport."
-        check(_outdoor(text) == "none", f"place name '{place}' should not read as a garden")
-
-
-def test_real_outdoor_still_detected():
-    check(_outdoor("flat with a private garden") == "private", "private garden")
-    check(_outdoor("access to a communal garden") == "communal", "communal garden")
-    check(_outdoor("flat with a private balcony") == "private", "private balcony")
-    check(_outdoor("only a juliet balcony here") == "juliet", "juliet balcony")
-    # Place name AND a real feature: the real feature wins.
-    check(_outdoor("flat in covent garden with a private balcony") == "private",
-          "real balcony in a garden-named area")
-    check(analyze_text("covent garden flat, unfurnished")["outdoor"] == "none",
-          "analyze_text end-to-end on Covent Garden")
-
-
-def test_llm_fallback_without_key():
-    # No key + no injected client -> classify returns None (caller keeps regex).
+def _reset_classify():
     classify._client_singleton = "unset"
     classify._logged_state = True  # silence the one-time log
     classify._cache.clear()
     for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
         os.environ.pop(var, None)
-    check(classify.classify_outdoor("some listing text") is None,
-          "no key -> classify_outdoor returns None")
 
 
 class _Block:
@@ -77,52 +52,94 @@ class _Block:
 
 
 class _Resp:
-    def __init__(self, category, stop_reason="end_turn"):
+    def __init__(self, payload, stop_reason="end_turn"):
         self.stop_reason = stop_reason
-        self.content = [_Block(json.dumps({"category": category, "evidence": "x"}))]
+        self.content = [_Block(json.dumps(payload))]
 
 
-def _stub_client(resp):
+def _stub(payload=None, resp=None):
+    """Install a stub Anthropic client returning `resp` (or one built from
+    `payload`); returns a dict tracking the number of API calls."""
     calls = {"n": 0}
+    the_resp = resp if resp is not None else _Resp(payload)
 
     class _Messages:
         def create(self, **kw):
             calls["n"] += 1
-            return resp
+            _stub.last_kwargs = kw
+            return the_resp
 
     class _Client:
         messages = _Messages()
 
-    return _Client(), calls
+    _reset_classify()
+    classify._client_singleton = _Client()
+    return calls
 
 
-def test_llm_parses_and_caches():
-    classify._cache.clear()
-    classify._logged_state = True
-    client, calls = _stub_client(_Resp("none"))
-    classify._client_singleton = client
-    check(classify.classify_outdoor("covent garden, no outdoor") == "none", "parses category")
-    # Second identical call is served from cache (no extra API call).
-    classify.classify_outdoor("covent garden, no outdoor")
-    check(calls["n"] == 1, "identical text is cached (one API call)")
+def test_furnishing_from_label():
+    check(furnishing_from_label("Furnished") == "furnished", "Furnished")
+    check(furnishing_from_label("Unfurnished") == "unfurnished", "Unfurnished")
+    check(furnishing_from_label("Part furnished") == "part-furnished", "Part furnished")
+    check(furnishing_from_label("Furnished or unfurnished") == "flexible", "flexible")
+    check(furnishing_from_label("") == "unknown", "empty -> unknown")
+    check(furnishing_from_label("Deposit: £3875") == "unknown", "unrelated -> unknown")
 
 
-def test_llm_rejects_bad_category_and_refusal():
-    classify._cache.clear()
-    classify._logged_state = True
-    client, _ = _stub_client(_Resp("patio"))  # not a valid category
-    classify._client_singleton = client
-    check(classify.classify_outdoor("weird text one") is None, "invalid category -> None")
+def test_classify_parses_and_caches():
+    calls = _stub({"outdoor": "none", "furnishing": "unfurnished", "size_sqft": 958})
+    out = classify.classify_listing(["1 bedroom"], "Moments from Covent Garden. UNFURNISHED.")
+    check(out == {"outdoor": "none", "furnishing": "unfurnished", "size_sqft": 958}, "parsed verdict")
+    # Source attributes are presented before the description in the prompt.
+    content = _stub.last_kwargs["messages"][0]["content"]
+    check(content.index("attributes") < content.index("Description"), "attributes come before description")
+    classify.classify_listing(["1 bedroom"], "Moments from Covent Garden. UNFURNISHED.")
+    check(calls["n"] == 1, "identical input is cached (one API call)")
 
-    client, _ = _stub_client(_Resp("none", stop_reason="refusal"))
-    classify._client_singleton = client
-    check(classify.classify_outdoor("weird text two") is None, "refusal -> None")
+
+def test_classify_size_normalised():
+    _stub({"outdoor": "private", "furnishing": "furnished", "size_sqft": 40})  # implausible
+    out = classify.classify_listing([], "tiny")
+    check(out["size_sqft"] is None, "implausible size -> None")
+    _stub({"outdoor": "private", "furnishing": "furnished", "size_sqft": None})
+    check(classify.classify_listing([], "x")["size_sqft"] is None, "null size ok")
+
+
+def test_classify_rejects_bad_and_refusal():
+    _stub({"outdoor": "patio", "furnishing": "furnished", "size_sqft": None})  # bad outdoor
+    check(classify.classify_listing([], "x") is None, "invalid outdoor -> None")
+    _stub({"outdoor": "none", "furnishing": "sofa", "size_sqft": None})  # bad furnishing
+    check(classify.classify_listing([], "y") is None, "invalid furnishing -> None")
+    _stub(resp=_Resp({"outdoor": "none", "furnishing": "furnished", "size_sqft": None}, stop_reason="refusal"))
+    check(classify.classify_listing([], "z") is None, "refusal -> None")
+
+
+def test_apply_uses_verdict_over_structured():
+    _stub({"outdoor": "private", "furnishing": "flexible", "size_sqft": 800})
+    l = Listing(title="t", platform="OnTheMarket", url="u", attributes=["Balcony"])
+    classify.apply_classification(l, "desc", struct_size=None, struct_furnishing="unfurnished")
+    check(l.outdoor == "private", "outdoor from Claude")
+    check(l.furnishing == "flexible", "furnishing from Claude (not the structured label)")
+    check(l.size_sqft == 800, "size from Claude when no structured size")
+
+    _stub({"outdoor": "private", "furnishing": "flexible", "size_sqft": 800})
+    l2 = Listing(title="t", platform="OnTheMarket", url="u2")
+    classify.apply_classification(l2, "desc", struct_size=650, struct_furnishing="unfurnished")
+    check(l2.size_sqft == 650, "structured size wins over Claude's")
+
+
+def test_apply_fallback_without_llm():
+    _reset_classify()
+    classify._client_singleton = None  # no LLM
+    l = Listing(title="t", platform="OpenRent", url="u", attributes=["Balcony"])
+    classify.apply_classification(l, "some description", struct_size=700, struct_furnishing="unfurnished")
+    check(l.outdoor == "none", "no LLM -> outdoor stays default 'none' (no regex fallback)")
+    check(l.furnishing == "unfurnished", "no LLM -> furnishing from structured label")
+    check(l.size_sqft == 700, "no LLM -> size from structured field")
+    check(classify.llm_active() is False, "llm_active False without a client")
 
 
 def test_only_new_flats_are_reclassified():
-    """A flat already in the tracker is 'known' (by URL or price/beds/postcode),
-    so the pipeline skips re-enriching / re-classifying it — an existing flat
-    can't suddenly grow a terrace."""
     import tempfile
 
     path = os.path.join(tempfile.mkdtemp(), "known.xlsx")
@@ -145,9 +162,6 @@ def test_only_new_flats_are_reclassified():
 
 
 def test_dropped_flats_are_remembered():
-    """A flat examined but dropped (no outdoor space) is recorded in the Seen
-    ledger, so it isn't re-classified on later runs even though it never enters
-    the visible tracker."""
     import tempfile
 
     path = os.path.join(tempfile.mkdtemp(), "seen.xlsx")
@@ -156,8 +170,7 @@ def test_dropped_flats_are_remembered():
                    outdoor="private", priority="High")
     dropped = Listing(title="Drop", platform="OnTheMarket", url="https://y/2",
                       postcode="EC1", price_pcm=3900, bed_count=2, bed_label="2-Bed",
-                      outdoor="none")  # no outdoor -> not in kept, but examined
-    # kept goes to the visible sheet; both were examined this run.
+                      outdoor="none")
     update_tracker(path, [kept], classified=[kept, dropped])
 
     seen_urls, seen_keys = known_identities(path)

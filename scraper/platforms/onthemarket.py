@@ -7,8 +7,8 @@ exact sqft live on the detail page, fetched by :func:`enrich`.
 
 from __future__ import annotations
 
-from ..classify import classify_outdoor
-from ..features import analyze_text
+from ..classify import apply_classification
+from ..features import furnishing_from_label
 from ..fetch import dump_html, fetch_html
 from ..models import Listing
 from . import base
@@ -39,10 +39,11 @@ def search(url: str, cfg: dict, listing_type: str = "flat", debug_dir=None) -> l
         details = p.get("details-url") or ""
         if not details:
             continue
-        feats = " ".join(str(x) for x in (p.get("features") or []))
+        feat_list = [str(x) for x in (p.get("features") or [])]
         addr = base.clean(p.get("address"))
         beds = p.get("bedrooms")
-        a = analyze_text(feats)
+        # Outdoor/furnishing/size are decided at enrich (Claude, from the fuller
+        # detail page); the search feature tags are carried as source attributes.
         listings.append(
             Listing(
                 title=base.clean(p.get("property-title") or p.get("humanised-property-type") or "OnTheMarket listing"),
@@ -54,10 +55,8 @@ def search(url: str, cfg: dict, listing_type: str = "flat", debug_dir=None) -> l
                 price_pcm=base.parse_price_pcm(str(p.get("short-price") or p.get("price"))),
                 bed_count=beds,
                 bed_label=_BED_LABEL.get(beds, f"{beds}-Bed" if beds is not None else ""),
-                furnishing=a["furnishing"],
-                outdoor=a["outdoor"],
-                size_sqft=a["sqft"],
-                notes=base.clean(feats)[:160],
+                attributes=feat_list,
+                notes=base.clean(" ".join(feat_list))[:160],
             )
         )
     return listings
@@ -106,34 +105,25 @@ def enrich(listing: Listing, debug_dir=None) -> None:
     node = _property_node(nxt) if nxt else None
     if node:
         letting = node.get("lettingDetails") or {}
-        parts = [str(x) for x in (letting.get("items") or [])] if isinstance(letting, dict) else []
-        parts += [
+        items = [str(x) for x in (letting.get("items") or [])] if isinstance(letting, dict) else []
+        tags = [
             str(f.get("feature", "")) if isinstance(f, dict) else str(f)
             for f in (node.get("features") or [])
         ]
-        parts += [str(node.get("description") or ""), str(node.get("summary") or "")]
-        text = base.clean(" ".join(parts))[:8000]
-        _merge(listing, analyze_text(text), text)
-        size = _node_size_sqft(node)
-        if size and not listing.size_sqft:
-            listing.size_sqft = size
-    else:  # fallback: visible body text
-        text = base.soup(html).get_text(" ")[:8000]
-        _merge(listing, analyze_text(text), text)
+        # Source attributes first: letting labels + feature tags feed the classifier.
+        listing.attributes = items + tags
+        description = base.clean(" ".join([str(node.get("description") or ""), str(node.get("summary") or "")]))
+        apply_classification(listing, description,
+                             struct_size=_node_size_sqft(node),
+                             struct_furnishing=_furnishing_of(items))
+    else:  # fallback: visible body text, no structured attributes
+        apply_classification(listing, base.clean(base.soup(html).get_text(" ")))
 
 
-def _merge(listing: Listing, a: dict, text: str = "") -> None:
-    # Outdoor space: let Claude decide from the full detail text (it handles
-    # place-name traps like "Covent Garden" that regex can't); fall back to the
-    # regex verdict, preferring a more-definite finding over the search guess.
-    llm = classify_outdoor(text) if text else None
-    if llm is not None:
-        listing.outdoor = llm
-    else:
-        order = {"private": 3, "communal": 2, "juliet": 1, "none": 0}
-        if order[a["outdoor"]] > order[listing.outdoor]:
-            listing.outdoor = a["outdoor"]
-    if listing.furnishing in ("", "unknown") and a["furnishing"] != "unknown":
-        listing.furnishing = a["furnishing"]
-    if not listing.size_sqft and a["sqft"]:
-        listing.size_sqft = a["sqft"]
+def _furnishing_of(items: list[str]) -> str:
+    """First recognised furnishing label among the letting-detail items."""
+    for it in items:
+        f = furnishing_from_label(it)
+        if f != "unknown":
+            return f
+    return "unknown"
