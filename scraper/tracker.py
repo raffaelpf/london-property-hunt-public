@@ -90,6 +90,42 @@ def _dupe_key(d: dict):
     return (d.get("Price (pcm)"), str(d.get("Bedrooms") or "").strip().lower(), pc)
 
 
+def _listing_dupe_key(listing: Listing):
+    """(price, beds, postcode) identity for a pre-tracker Listing — mirrors what
+    ``_values`` -> ``_dupe_key`` produce for a written row, so the two agree."""
+    pc = str(listing.postcode or "").strip().lower()
+    if not pc:
+        return None
+    beds = listing.bed_label or (listing.bed_count if listing.bed_count is not None else "")
+    return (listing.price_pcm, str(beds).strip().lower(), pc)
+
+
+def known_identities(path: str | Path) -> tuple[set, set]:
+    """Return ``(seen_urls, seen_keys)`` already recorded in the tracker.
+
+    Lets the caller skip re-enriching / re-classifying flats it already has —
+    an existing flat's outdoor space, furnishing and size don't change, and it's
+    dedup'd out of the tracker anyway, so the work (and LLM cost) is wasted.
+    """
+    p = Path(path)
+    if not p.exists():
+        return set(), set()
+    ws = load_or_create(path)[FLATS_SHEET]
+    existing = _read_rows(ws)
+    seen_urls = {u for d in existing if (u := str(d.get("URL", "")).strip())}
+    seen_keys = {k for k in (_dupe_key(d) for d in existing) if k}
+    return seen_urls, seen_keys
+
+
+def is_known(listing: Listing, seen_urls: set, seen_keys: set) -> bool:
+    """True if this flat is already in the tracker (by URL or price/beds/postcode)."""
+    url = str(listing.url or "").strip()
+    if url and url in seen_urls:
+        return True
+    key = _listing_dupe_key(listing)
+    return bool(key and key in seen_keys)
+
+
 def _read_rows(ws) -> list[dict]:
     """Read existing data rows as dicts, preserving any manual edits (Status, etc.)."""
     rows: list[dict] = []

@@ -21,6 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scraper import classify
 from scraper.features import _outdoor, analyze_text  # noqa: E402
+from scraper.models import Listing  # noqa: E402
+from scraper.tracker import is_known, known_identities, update_tracker  # noqa: E402
 
 _checks = 0
 
@@ -115,6 +117,31 @@ def test_llm_rejects_bad_category_and_refusal():
     client, _ = _stub_client(_Resp("none", stop_reason="refusal"))
     classify._client_singleton = client
     check(classify.classify_outdoor("weird text two") is None, "refusal -> None")
+
+
+def test_only_new_flats_are_reclassified():
+    """A flat already in the tracker is 'known' (by URL or price/beds/postcode),
+    so the pipeline skips re-enriching / re-classifying it — an existing flat
+    can't suddenly grow a terrace."""
+    import tempfile
+
+    path = os.path.join(tempfile.mkdtemp(), "known.xlsx")
+    tracked = Listing(title="A", platform="OnTheMarket", url="https://x/1",
+                      postcode="WC2H", price_pcm=3800, bed_count=2, bed_label="2-Bed",
+                      outdoor="private", priority="High")
+    update_tracker(path, [tracked])
+    seen_urls, seen_keys = known_identities(path)
+
+    same_url = Listing(title="A", platform="OnTheMarket", url="https://x/1",
+                       postcode="WC2H", price_pcm=3800, bed_count=2, bed_label="2-Bed")
+    relisted = Listing(title="A relisted", platform="OpenRent", url="https://x/1-NEW",
+                       postcode="WC2H", price_pcm=3800, bed_count=2, bed_label="2-Bed")
+    genuinely_new = Listing(title="C", platform="OnTheMarket", url="https://x/9",
+                            postcode="EC1", price_pcm=4000, bed_count=1, bed_label="1-Bed")
+
+    check(is_known(same_url, seen_urls, seen_keys), "same URL is known")
+    check(is_known(relisted, seen_urls, seen_keys), "re-listed same flat (new URL) is known via price/beds/postcode")
+    check(not is_known(genuinely_new, seen_urls, seen_keys), "a genuinely new flat is not known")
 
 
 def main():

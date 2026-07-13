@@ -54,8 +54,13 @@ During detail-page enrichment, `scraper/classify.py` asks **Claude** to read the
 listing text and return `private` / `communal` / `juliet` / `none`. An LLM knows
 "Covent Garden" is a location, not a garden, so these place-name traps go away.
 
+- **Only new flats are classified.** Before enrichment the run reads the flats
+  already in the tracker (by URL and by price/beds/postcode) and skips them — an
+  existing flat's outdoor space doesn't change, and it's already recorded, so
+  re-classifying it would just waste an API call. Only genuinely-new candidates
+  are enriched and sent to Claude.
 - **Enabled automatically** when `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`)
-  is set in the environment. The call runs only on enriched candidates
+  is set in the environment. The call runs only on enriched (new) candidates
   (≤ `MAX_ENRICH` per run), not on every search result.
 - **Graceful fallback:** with no key, the SDK missing, or an API error, it falls
   back to the regex in `features.py` — which now also strips the common

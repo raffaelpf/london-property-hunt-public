@@ -24,7 +24,7 @@ from scraper.models import Listing
 from scraper.outreach import write_outreach_files
 from scraper.platforms import REGISTRY
 from scraper.prioritise import _area_tier, prioritise
-from scraper.tracker import update_tracker
+from scraper.tracker import is_known, known_identities, update_tracker
 
 MAX_ENRICH = 120  # cap detail-page fetches per run
 
@@ -149,8 +149,18 @@ def run(cfg, tracker_path, outreach_dir, platforms, debug_dir, limit) -> dict:
     # Collapse cross-platform duplicates, keeping the master (Rightmove) copy.
     candidates = dedup_master(candidates)
 
+    # Only enrich/classify genuinely-new flats. An existing flat's outdoor space,
+    # furnishing and size don't change, and it's already recorded (dedup'd out of
+    # the tracker below), so re-fetching its detail page and re-asking the LLM is
+    # wasted work and cost. Known flats stay in the tracker untouched.
+    seen_urls, seen_keys = known_identities(tracker_path)
+    fresh = [c for c in candidates if not is_known(c, seen_urls, seen_keys)]
+    skipped_known = len(candidates) - len(fresh)
+    if skipped_known:
+        print(f"  {len(fresh)} new to enrich/classify; {skipped_known} already tracked (skipped)")
+
     enriched = 0
-    for l in candidates:
+    for l in fresh:
         module = REGISTRY.get(l.platform)
         if module and hasattr(module, "enrich") and enriched < MAX_ENRICH:
             try:
@@ -158,11 +168,11 @@ def run(cfg, tracker_path, outreach_dir, platforms, debug_dir, limit) -> dict:
                 enriched += 1
             except Exception:
                 pass
-    if len([c for c in candidates if hasattr(REGISTRY.get(c.platform), "enrich")]) > MAX_ENRICH:
+    if len([c for c in fresh if hasattr(REGISTRY.get(c.platform), "enrich")]) > MAX_ENRICH:
         print(f"  ⚠️ enrich capped at {MAX_ENRICH}; some listings not detail-checked", file=sys.stderr)
 
     kept: list[Listing] = []
-    for l in candidates:
+    for l in fresh:
         p = prioritise(l, cfg)
         if p is None:
             continue
@@ -177,6 +187,7 @@ def run(cfg, tracker_path, outreach_dir, platforms, debug_dir, limit) -> dict:
 
     return {
         "per_platform": per_platform, "raw": len(raw), "candidates": len(candidates),
+        "fresh": len(fresh), "skipped_known": skipped_known,
         "enriched": enriched, "priorities": priorities, "tracker": counts,
         "outreach_written": len(outreach_files), "errors": errors, "kept": kept,
     }
