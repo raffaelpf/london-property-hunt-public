@@ -21,9 +21,15 @@ Comma-separated, in priority order. Used to build per-area search URLs and to
 match a listing's location for prioritisation.
 
 ```
-PRIMARY_AREAS=Soho, Waterloo, Farringdon, Covent Garden, Southwark, Bloomsbury
+PRIMARY_AREAS=Soho, Waterloo, Farringdon, Covent Garden, Southwark, Bloomsbury, Clerkenwell, Holborn, Barbican, Fitzrovia, Euston, St Pancras, SE1, WC1, EC1
 SECONDARY_AREAS=
 ```
+
+Zoopla only understands its own location names (e.g. *Waterloo*, *Farringdon*
+and *Bloomsbury* aren't Zoopla locations, while *Clerkenwell* or *SE1* are);
+areas it doesn't recognise are skipped for Zoopla only, with a console note.
+Postcode districts (SE1, WC1, EC1) are handy: all platforms accept them and
+they match listing postcodes directly.
 
 ## What you're looking for
 

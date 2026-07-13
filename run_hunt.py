@@ -30,7 +30,7 @@ from scraper.tracker import is_known, known_identities, update_tracker
 MAX_ENRICH = 120  # cap detail-page fetches per run
 
 # Same flat is often listed on several portals — prefer Rightmove as the master.
-_PLATFORM_RANK = {"Rightmove": 0, "OnTheMarket": 1, "OpenRent": 2}
+_PLATFORM_RANK = {"Rightmove": 0, "Zoopla": 1, "OnTheMarket": 2, "OpenRent": 3}
 # Direct download of the committed tracker (lives on the daily-tracker branch).
 TRACKER_DOWNLOAD = (
     "https://github.com/raffaelpf/london-property-hunt-public/raw/"
@@ -83,6 +83,16 @@ def build_jobs(cfg: dict, platforms: set[str]) -> list[dict]:
             jobs.append({"platform": "OnTheMarket", "type": "flat", "area": area,
                          "url": f"https://www.onthemarket.com/to-rent/property/{_slug(area)}/"
                                 f"?max-price={pmax}&min-price={pmin}&min-bedrooms={bmin}&max-bedrooms={bmax}"})
+
+    if "Zoopla" in platforms:
+        # Per-area slug searches (like OnTheMarket). No furnishing filter in the
+        # URL — Zoopla's is single-choice — so prioritise.py handles demotion.
+        # Areas Zoopla doesn't recognise are skipped inside zoopla.search().
+        for area in areas:
+            jobs.append({"platform": "Zoopla", "type": "flat", "area": area,
+                         "url": f"https://www.zoopla.co.uk/to-rent/flats/{_slug(area)}/"
+                                f"?price_frequency=per_month&price_min={pmin}&price_max={pmax}"
+                                f"&beds_min={bmin}&beds_max={bmax}&results_sort=newest_listings"})
 
     if "OpenRent" in platforms and areas:
         term = quote(",".join(areas))
@@ -299,7 +309,7 @@ def main() -> int:
     ap.add_argument("--config", default=None)
     ap.add_argument("--tracker", default=None)
     ap.add_argument("--outreach-dir", default=None)
-    ap.add_argument("--platforms", default="Rightmove,OnTheMarket,OpenRent")
+    ap.add_argument("--platforms", default="Rightmove,OnTheMarket,OpenRent,Zoopla")
     ap.add_argument("--debug-dir", default=None)
     ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()
@@ -313,7 +323,11 @@ def main() -> int:
     outreach_dir = str(args.outreach_dir or (repo / "outreach"))
     platforms = {p.strip() for p in args.platforms.split(",") if p.strip()}
 
-    res = run(cfg, tracker_path, outreach_dir, platforms, args.debug_dir, args.limit)
+    try:
+        res = run(cfg, tracker_path, outreach_dir, platforms, args.debug_dir, args.limit)
+    finally:
+        from scraper import fetch_browser
+        fetch_browser.close()  # shut down the Zoopla browser session, if started
     print_summary(res, tracker_path, get_int(cfg, "RECENT_HOURS", 24) or 24)
     return 0
 
